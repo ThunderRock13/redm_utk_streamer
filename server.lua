@@ -324,7 +324,7 @@ AddEventHandler('playerDropped', function()
         -- Give 10 seconds for reconnect
         SetTimeout(10000, function()
             if activeStreams[playerId] and activeStreams[playerId].streamId == stream.streamId then
-                CallMediaServer("streams/" .. stream.streamId .. "/stop", "POST")
+                CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
                 activeStreams[playerId] = nil
                 print(string.format("^3[Cleanup]^7 Stream %s cleaned after timeout", stream.streamId))
             end
@@ -341,11 +341,11 @@ CreateThread(function()
             -- Check if player still exists
             if not GetPlayerName(playerId) then
                 print(string.format("^3[Cleanup]^7 Removing orphaned stream %s", stream.streamId))
-                CallMediaServer("streams/" .. stream.streamId .. "/stop", "POST")
+                CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
                 activeStreams[playerId] = nil
             else
                 -- Update stream stats
-                CallMediaServer("streams/" .. stream.streamId .. "/heartbeat", "POST", {
+                CallMediaServer("/streams/" .. stream.streamId .. "/heartbeat", "POST", {
                     playerId = playerId,
                     playerName = GetPlayerName(playerId),
                     uptime = os.time() - stream.startTime
@@ -374,7 +374,7 @@ function CallMediaServer(endpoint, method, data, callback)
     
     PerformHttpRequest(url, function(statusCode, response, headers)
         if Config.Debug then
-            print(string.format("^2[Media Server]^7 %s %s - Status: %d", method, endpoint, statusCode))
+            print(string.format("^2[Media Server]^7 %s %s - Status: %d, Response: %s", method, url, statusCode, response and response or nil))
         end
         
         if callback then

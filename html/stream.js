@@ -50,6 +50,179 @@ window.addEventListener('message', async (event) => {
     }
 });
 
+class CfxGameViewRenderer {
+  #gl;
+  #texture;
+  #animationFrame;
+
+  constructor(canvas) {
+    const gl = canvas.getContext('webgl', {
+      antialias: false,
+      depth: false,
+      alpha: false,
+      stencil: false,
+      desynchronized: true,
+      powerPreference: 'high-performance',
+    });
+
+    if (!gl) {
+      throw new Error('Failed to acquire webgl context for GameViewRenderer');
+    }
+
+    this.#gl = gl;
+
+    this.#texture = this.#createTexture(gl);
+    const { program, vloc, tloc } = this.#createProgram(gl);
+    const { vertexBuff, texBuff } = this.#createBuffers(gl);
+
+    gl.useProgram(program);
+
+    gl.bindTexture(gl.TEXTURE_2D, this.#texture);
+
+    gl.uniform1i(gl.getUniformLocation(program, "external_texture"), 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuff);
+    gl.vertexAttribPointer(vloc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(vloc);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, texBuff);
+    gl.vertexAttribPointer(tloc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(tloc);
+
+    this.#render();
+  }
+
+  #compileAndLinkShaders(gl, program, vs, fs) {
+    gl.compileShader(vs);
+    gl.compileShader(fs);
+
+    gl.linkProgram(program);
+
+    if (gl.getProgramParameter(program, gl.LINK_STATUS))
+    {
+      return;
+    }
+
+    console.error('Link failed:', gl.getProgramInfoLog(program));
+    console.error('vs log:', gl.getShaderInfoLog(vs));
+    console.error('fs log:', gl.getShaderInfoLog(fs));
+
+    throw new Error('Failed to compile shaders');
+  }
+
+  #attachShader(gl, program, type, src) {
+    const shader = gl.createShader(type);
+
+    gl.shaderSource(shader, src);
+    gl.attachShader(program, shader);
+
+    return shader;
+  }
+
+  #createProgram(gl) {
+    const program = gl.createProgram();
+
+    const vertexShaderSrc = `
+      attribute vec2 a_position;
+      attribute vec2 a_texcoord;
+      uniform mat3 u_matrix;
+      varying vec2 textureCoordinate;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        textureCoordinate = a_texcoord;
+      }
+    `;
+
+    const fragmentShaderSrc = `
+    varying highp vec2 textureCoordinate;
+    uniform sampler2D external_texture;
+    void main()
+    {
+      gl_FragColor = texture2D(external_texture, textureCoordinate);
+    }
+    `;
+
+    const vertexShader = this.#attachShader(gl, program, gl.VERTEX_SHADER, vertexShaderSrc);
+    const fragmentShader = this.#attachShader(gl, program, gl.FRAGMENT_SHADER, fragmentShaderSrc);
+
+    this.#compileAndLinkShaders(gl, program, vertexShader, fragmentShader);
+
+    gl.useProgram(program);
+
+    const vloc = gl.getAttribLocation(program, "a_position");
+    const tloc = gl.getAttribLocation(program, "a_texcoord");
+
+    return { program, vloc, tloc };
+  }
+
+  #createTexture(gl) {
+    const tex = gl.createTexture();
+
+    const texPixels = new Uint8Array([0, 0, 255, 255]);
+
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, texPixels);
+
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+
+    // Magic hook sequence
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+    // Reset
+    gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    return tex;
+  }
+
+  #createBuffers(gl) {
+    const vertexBuff = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuff);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,
+      1, -1,
+      -1, 1,
+      1, 1,
+    ]), gl.STATIC_DRAW);
+
+    const texBuff = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, texBuff);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+		0, 1,
+		1, 1,
+		0, 0,
+		1, 0,
+    ]), gl.STATIC_DRAW);
+
+    return { vertexBuff, texBuff };
+  }
+
+  resize(width, height) {
+    this.#gl.viewport(0, 0, width, height);
+    this.#gl.canvas.width = width;
+    this.#gl.canvas.height = height;
+  }
+
+  destroy() {
+    if (this.#animationFrame) {
+      cancelAnimationFrame(this.#animationFrame);
+    }
+    this.#texture = null;
+  }
+
+  #render = () => {
+    const gl = this.#gl;
+    if (gl)
+    {
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    this.#animationFrame = requestAnimationFrame(this.#render);
+  };
+}
+
 async function startStream(config) {
     log('Starting stream:', config.streamId);
     
@@ -70,32 +243,8 @@ async function startStream(config) {
             throw new Error('Canvas element not found');
         }
         
-        // Check if MainRender is available
-        if (typeof MainRender === 'undefined') {
-            log('MainRender not ready, waiting...');
-            
-            // Try to access it from the window
-            if (window.MainRender) {
-                window.globalThis.MainRender = window.MainRender;
-            }
-            
-            // Wait a bit more for module to load
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            if (typeof MainRender === 'undefined') {
-                throw new Error('MainRender not available - utk_render module not loaded');
-            }
-        }
-        
-        log('MainRender available, starting capture');
-        
-        // Start rendering to canvas
-        if (!renderStarted) {
-            MainRender.renderToTarget(canvas);
-            renderStarted = true;
-            log('Render started to canvas');
-        }
-        
+        let MainRender = new CfxGameViewRenderer(canvas);
+
         // Wait for rendering to stabilize
         await new Promise(resolve => setTimeout(resolve, 2000));
         
@@ -110,13 +259,6 @@ async function startStream(config) {
                 localStream = canvas.mozCaptureStream(30);
                 log('Using canvas.mozCaptureStream');
             } catch (e2) {
-                // Method 3: Create from MainRender if available
-                if (MainRender.getStream) {
-                    localStream = MainRender.getStream();
-                    log('Using MainRender.getStream');
-                } else {
-                    throw new Error('No capture method available');
-                }
             }
         }
         
@@ -475,10 +617,6 @@ function notifyError(error) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ error: error })
     });
-}
-
-function GetParentResourceName() {
-    return 'redm_streamer';
 }
 
 // Auto cleanup on page unload

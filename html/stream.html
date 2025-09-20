@@ -7,7 +7,7 @@
     
 </head>
 <body>
-    
+    <canvas id="stream-canvas" width="1920" height="1080" style="display: none;"></canvas>
     
     <!-- Debug panel -->
     <div id="debug">
@@ -18,7 +18,7 @@
     </div>
     
     <!-- IMPORTANT: Load the utk_render script module first -->
-    <script type="module" src="nui://redm_streamer/script.js"></script>
+    <script type="module" src="stream.js"></script>
     <script>
         // Wait for module to load
         setTimeout(() => {

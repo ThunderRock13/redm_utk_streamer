@@ -140,6 +140,7 @@ app.get('/api/streams/:streamId/stats', authenticateAPI, (req, res) => {
 // Stream heartbeat
 app.post('/api/streams/:streamId/heartbeat', authenticateAPI, (req, res) => {
     const { streamId } = req.params;
+    console.log(streamId, activeStreams.get(streamId))
     const stream = activeStreams.get(streamId);
     
     if (stream) {

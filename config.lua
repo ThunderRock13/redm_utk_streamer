@@ -13,10 +13,10 @@ Config.MediaServer = {
 
 -- Stream Quality Settings
 Config.StreamQuality = {
-    width = 1280,
-    height = 720,
-    fps = 30,
-    bitrate = 2500000
+    width = 1920,
+    height = 1080,
+    fps = 120,
+    bitrate = 2500000000000
 }
 
 -- Debug
