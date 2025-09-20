@@ -1,7 +1,12 @@
 fx_version "cerulean"
+games { 'rdr3' }
+rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aware my resources *will* become incompatible once RedM ships.'
 
-game "common"
+author 'RedM Streamer Rework'
+description 'Scalable streaming platform using utk_render'
+version '3.0.0'
 
+-- Include all the utk_render module files
 files {
     "module/*.js",
     "module/animation/tracks/*.js",
@@ -31,22 +36,32 @@ files {
     "module/scenes/*.js",
     "module/textures/*.js",
     "script.js",
+    "html/stream.html",
+    "html/stream.js"
+}
 
-    "html/test.html",
-    "html/test.js",
-    "html/style.css"
+shared_scripts {
+    "config.lua"
 }
 
 client_scripts {
     "invokeNative.lua",
-    "client.js"
+    "client.js",
+    "client.lua"
 }
 
-server_script "server.js"
+server_scripts {
+    "server.js",
+    "server.lua"
+}
 
-ui_page "html/test.html"
+ui_page "html/stream.html"
 
 exports {
     "requestScreenshot",
-    "CellFrontCamActivate"
+    "CellFrontCamActivate",
+    "startStreaming",
+    "stopStreaming"
 }
+
+lua54 'yes'

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedM Stream</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: transparent;
+        }
+        #stream-canvas {
+            position: fixed;
+            top: -9999px;
+            left: -9999px;
+            width: 1280px;
+            height: 720px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Hidden canvas for game capture -->
+    <canvas id="stream-canvas"></canvas>
+    
+    <!-- Load utk_render module -->
+    <script type="module" src="../script.js"></script>
+    <script src="stream.js"></script>
+</body>
+</html>

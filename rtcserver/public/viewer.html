@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedM Stream Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 1200px;
+            width: 100%;
+            padding: 30px;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+            font-size: 2rem;
+        }
+        
+        .controls {
+            background: #f7f7f7;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .video-container {
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+            margin-bottom: 20px;
+            display: none;
+        }
+        
+        .video-container.active {
+            display: block;
+        }
+        
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            display: none;
+        }
+        
+        .status.active {
+            display: block;
+        }
+        
+        .status.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            border-left: 4px solid #1976d2;
+        }
+        
+        .status.success {
+            background: #e8f5e9;
+            color: #388e3c;
+            border-left: 4px solid #388e3c;
+        }
+        
+        .status.error {
+            background: #ffebee;
+            color: #d32f2f;
+            border-left: 4px solid #d32f2f;
+        }
+        
+        .streams-list {
+            background: #f7f7f7;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .streams-list.active {
+            display: block;
+        }
+        
+        .stream-item {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: transform 0.2s;
+        }
+        
+        .stream-item:hover {
+            transform: translateX(5px);
+        }
+        
+        .stream-info {
+            flex: 1;
+        }
+        
+        .stream-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .stream-details {
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .live-dot {
+            width: 10px;
+            height: 10px;
+            background: #ff4444;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .stats {
+            background: #f7f7f7;
+            padding: 15px;
+            border-radius: 8px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .stats.active {
+            display: grid;
+        }
+        
+        .stat-item {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .stat-value {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 RedM Stream Viewer</h1>
+        
+        <div class="controls">
+            <div class="input-group">
+                <input type="text" id="streamKeyInput" placeholder="Enter Stream Key (e.g., abc123-def456)">
+                <button id="connectBtn" onclick="connectToStream()">Connect</button>
+                <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+            </div>
+            <div class="input-group">
+                <button onclick="getActiveStreams()">Get Active Streams</button>
+                <button onclick="toggleStats()">Toggle Stats</button>
+            </div>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div id="videoContainer" class="video-container">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div class="overlay">
+                <div class="live-dot"></div>
+                <span>LIVE</span>
+                <span id="streamIdDisplay"></span>
+            </div>
+        </div>
+        
+        <div id="stats" class="stats">
+            <div class="stat-item">
+                <div class="stat-label">Connection</div>
+                <div class="stat-value" id="connectionState">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Ice State</div>
+                <div class="stat-value" id="iceState">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Bitrate</div>
+                <div class="stat-value" id="bitrate">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Packets Lost</div>
+                <div class="stat-value" id="packetsLost">0</div>
+            </div>
+        </div>
+        
+        <div id="streamsList" class="streams-list">
+            <h3>Active Streams</h3>
+            <div id="streamsContainer"></div>
+        </div>
+    </div>
+    
+    <script>
+        const SERVER_URL = 'http://localhost:3000';
+        const WS_URL = 'ws://localhost:3000/ws';
+        const API_KEY = 'redm-media-server-key-2024';
+        
+        let ws = null;
+        let pc = null;
+        let currentStreamKey = null;
+        let statsInterval = null;
+        
+        // Get stream key from URL if present
+        const urlParams = new URLSearchParams(window.location.search);
+        const streamParam = urlParams.get('stream');
+        if (streamParam) {
+            document.getElementById('streamKeyInput').value = streamParam;
+            setTimeout(() => connectToStream(), 500);
+        }
+        
+        function updateStatus(message, type = 'info') {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type} active`;
+            
+            if (type !== 'error') {
+                setTimeout(() => {
+                    status.classList.remove('active');
+                }, 5000);
+            }
+        }
+        
+        async function connectToStream() {
+            const streamKey = document.getElementById('streamKeyInput').value.trim();
+            
+            if (!streamKey) {
+                updateStatus('Please enter a stream key', 'error');
+                return;
+            }
+            
+            currentStreamKey = streamKey;
+            updateStatus('Connecting to stream...', 'info');
+            
+            // Connect to WebSocket
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                
+                // Register as viewer
+                ws.send(JSON.stringify({
+                    type: 'register-viewer',
+                    streamKey: streamKey
+                }));
+                
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+            };
+            
+            ws.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                console.log('WS Message:', data.type);
+                
+                switch(data.type) {
+                    case 'registered':
+                        updateStatus('Connected to stream, waiting for video...', 'info');
+                        document.getElementById('streamIdDisplay').textContent = streamKey;
+                        setupPeerConnection();
+                        break;
+                        
+                    case 'offer':
+                        await handleOffer(data.offer);
+                        break;
+                        
+                    case 'ice-candidate':
+                        await handleIceCandidate(data.candidate);
+                        break;
+                        
+                    case 'stream-ended':
+                        updateStatus('Stream has ended', 'error');
+                        disconnect();
+                        break;
+                        
+                    case 'error':
+                        updateStatus(data.message, 'error');
+                        disconnect();
+                        break;
+                        
+                    case 'ping':
+                        ws.send(JSON.stringify({ type: 'pong' }));
+                        break;
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateStatus('Connection error', 'error');
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                updateStatus('Disconnected from stream', 'info');
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+            };
+        }
+        
+        function setupPeerConnection() {
+            const configuration = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            };
+            
+            pc = new RTCPeerConnection(configuration);
+            
+            pc.ontrack = (event) => {
+                console.log('Received remote stream');
+                const remoteVideo = document.getElementById('remoteVideo');
+                remoteVideo.srcObject = event.streams[0];
+                
+                document.getElementById('videoContainer').classList.add('active');
+                updateStatus('Stream connected!', 'success');
+                
+                // Start stats monitoring
+                startStatsMonitoring();
+            };
+            
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    }));
+                }
+            };
+            
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                document.getElementById('connectionState').textContent = state;
+                
+                if (state === 'failed' || state === 'disconnected') {
+                    updateStatus('Connection lost', 'error');
+                }
+            };
+            
+            pc.oniceconnectionstatechange = () => {
+                document.getElementById('iceState').textContent = pc.iceConnectionState;
+            };
+        }
+        
+        async function handleOffer(offer) {
+            if (!pc) {
+                setupPeerConnection();
+            }
+            
+            try {
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                ws.send(JSON.stringify({
+                    type: 'answer',
+                    answer: answer
+                }));
+            } catch (error) {
+                console.error('Error handling offer:', error);
+            }
+        }
+        
+        async function handleIceCandidate(candidate) {
+            if (pc) {
+                try {
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (error) {
+                    console.error('Error adding ICE candidate:', error);
+                }
+            }
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            
+            const remoteVideo = document.getElementById('remoteVideo');
+            remoteVideo.srcObject = null;
+            
+            document.getElementById('videoContainer').classList.remove('active');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            document.getElementById('stats').classList.remove('active');
+            
+            currentStreamKey = null;
+        }
+        
+        function startStatsMonitoring() {
+            statsInterval = setInterval(async () => {
+                if (pc && pc.connectionState === 'connected') {
+                    const stats = await pc.getStats();
+                    let bitrate = 0;
+                    let packetsLost = 0;
+                    
+                    stats.forEach(report => {
+                        if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                            bitrate = Math.round((report.bytesReceived * 8) / 1000);
+                            packetsLost = report.packetsLost || 0;
+                        }
+                    });
+                    
+                    document.getElementById('bitrate').textContent = bitrate + ' kbps';
+                    document.getElementById('packetsLost').textContent = packetsLost;
+                }
+            }, 1000);
+        }
+        
+        function toggleStats() {
+            const stats = document.getElementById('stats');
+            stats.classList.toggle('active');
+        }
+        
+        async function getActiveStreams() {
+            try {
+                const response = await fetch(`${SERVER_URL}/api/streams`, {
+                    headers: {
+                        'X-API-Key': API_KEY
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch streams');
+                }
+                
+                const streams = await response.json();
+                displayStreams(streams);
+                
+            } catch (error) {
+                updateStatus('Failed to fetch streams', 'error');
+            }
+        }
+        
+        function displayStreams(streams) {
+            const list = document.getElementById('streamsList');
+            const container = document.getElementById('streamsContainer');
+            
+            if (streams.length === 0) {
+                container.innerHTML = '<p>No active streams</p>';
+            } else {
+                container.innerHTML = streams.map(stream => `
+                    <div class="stream-item">
+                        <div class="stream-info">
+                            <div class="stream-name">${stream.playerName}</div>
+                            <div class="stream-details">
+                                Viewers: ${stream.viewers} | Duration: ${formatDuration(stream.duration)}
+                            </div>
+                        </div>
+                        <button onclick="quickConnect('${stream.streamKey}')">Watch</button>
+                    </div>
+                `).join('');
+            }
+            
+            list.classList.add('active');
+        }
+        
+        function quickConnect(streamKey) {
+            document.getElementById('streamKeyInput').value = streamKey;
+            connectToStream();
+        }
+        
+        function formatDuration(ms) {
+            const seconds = Math.floor(ms / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes % 60}m`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds % 60}s`;
+            } else {
+                return `${seconds}s`;
+            }
+        }
+    </script>
+</body>
+</html>
