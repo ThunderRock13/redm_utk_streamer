@@ -35,6 +35,8 @@ CreateThread(function()
 end)
 
 -- Start stream request (from admin or other resource)
+-- In your server.lua, find the requestStream handler and make sure it includes streamKey:
+
 RegisterNetEvent('redm_streamer:requestStream')
 AddEventHandler('redm_streamer:requestStream', function(targetPlayerId)
     local source = source
@@ -61,33 +63,38 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId)
         if success and data then
             activeStreams[targetPlayerId] = {
                 streamId = streamId,
+                streamKey = data.streamKey,  -- IMPORTANT: Store the streamKey
                 webrtcEndpoint = data.webrtcEndpoint,
-                hlsUrl = data.hlsUrl,
+                hlsUrl = data.hlsUrl or data.viewerUrl,
                 startTime = os.time(),
                 viewers = 0
             }
             
-            -- Tell player to start streaming
+            -- Tell player to start streaming WITH THE STREAMKEY
             TriggerClientEvent('redm_streamer:startStream', targetPlayerId, {
                 streamId = streamId,
-                webrtcUrl = data.webrtcEndpoint,
+                streamKey = data.streamKey,  -- IMPORTANT: Send the streamKey
+                webrtcUrl = data.webrtcEndpoint or 'http://localhost:3000/webrtc',
+                webSocketUrl = data.webSocketUrl or 'ws://localhost:3000/ws',
                 stunServer = data.stunServer,
                 turnServer = data.turnServer
             })
             
             print(string.format("^2[Streamer]^7 Stream started: %s", streamId))
-            print(string.format("^2[Streamer]^7 HLS URL: %s", data.hlsUrl))
+            print(string.format("^2[Streamer]^7 Stream Key: %s", data.streamKey))
+            print(string.format("^2[Streamer]^7 HLS URL: %s", data.hlsUrl or data.viewerUrl))
             
             -- Notify requester with viewing URL
             if source ~= 0 and source ~= targetPlayerId then
                 TriggerClientEvent('redm_streamer:viewUrl', source, {
                     streamId = streamId,
-                    hlsUrl = data.hlsUrl,
+                    hlsUrl = data.hlsUrl or data.viewerUrl,
                     playerName = GetPlayerName(targetPlayerId)
                 })
             end
         else
             TriggerClientEvent('redm_streamer:notify', source, 'Failed to create stream')
+            print("^1[Streamer]^7 Failed to create stream on media server")
         end
     end)
 end)

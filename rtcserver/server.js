@@ -258,18 +258,35 @@ function handleStreamerRegistration(clientId, ws, data) {
     connection.role = 'streamer';
     connection.streamKey = streamKey;
     
+    // Check if this is a reconnection
+    const isReconnect = stream.streamerWs === null;
+    
     // Store streamer WebSocket
     stream.streamerWs = ws;
     
     ws.send(JSON.stringify({ 
         type: 'registered',
         role: 'streamer',
-        streamKey 
+        streamKey,
+        isReconnect 
     }));
     
-    console.log(`[WS] Streamer registered for stream: ${stream.streamId}`);
+    if (isReconnect) {
+        console.log(`[WS] Streamer reconnected for stream: ${stream.streamId}`);
+        
+        // Notify about existing viewers
+        if (stream.viewerWsList.length > 0) {
+            stream.viewerWsList.forEach((viewerWs, index) => {
+                ws.send(JSON.stringify({
+                    type: 'viewer-joined',
+                    viewerId: `viewer_${index}`
+                }));
+            });
+        }
+    } else {
+        console.log(`[WS] Streamer registered for stream: ${stream.streamId}`);
+    }
 }
-
 function handleViewerRegistration(clientId, ws, data) {
     const { streamKey } = data;
     
@@ -431,7 +448,7 @@ function handleDisconnect(clientId) {
                 stream.viewerCount = Math.max(0, stream.viewerCount - 1);
                 stream.viewerWsList = stream.viewerWsList.filter(ws => ws !== connection.ws);
                 
-                // Notify streamer
+                // Notify streamer if still connected
                 if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
                     stream.streamerWs.send(JSON.stringify({
                         type: 'viewer-left',
@@ -446,17 +463,27 @@ function handleDisconnect(clientId) {
         
         viewers.delete(clientId);
     } else if (connection.role === 'streamer' && connection.streamKey) {
-        // Streamer disconnected - end stream
+        // Don't immediately delete stream, mark as disconnected
         for (const [id, stream] of activeStreams) {
             if (stream.streamKey === connection.streamKey) {
-                // Notify all viewers
-                stream.viewerWsList.forEach(ws => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'stream-ended' }));
-                    }
-                });
+                stream.streamerWs = null;
+                console.log(`[WS] Streamer disconnected from stream: ${stream.streamId}`);
                 
-                console.log(`[WS] Streamer disconnected, ending stream: ${stream.streamId}`);
+                // Give 30 seconds to reconnect before ending stream
+                setTimeout(() => {
+                    if (!stream.streamerWs) {
+                        // Notify all viewers
+                        stream.viewerWsList.forEach(ws => {
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'stream-ended' }));
+                            }
+                        });
+                        
+                        activeStreams.delete(id);
+                        console.log(`[WS] Stream ended due to timeout: ${stream.streamId}`);
+                    }
+                }, 30000);
+                
                 break;
             }
         }

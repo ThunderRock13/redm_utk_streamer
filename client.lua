@@ -15,16 +15,25 @@ AddEventHandler('redm_streamer:startStream', function(config)
     streamConfig = config
     
     print(string.format("^2[Streamer]^7 Starting stream: %s", config.streamId))
+    print(string.format("^2[Streamer]^7 WebSocket URL: %s", config.webSocketUrl or "Not set"))
+    print(string.format("^2[Streamer]^7 Stream Key: %s", config.streamKey or "Not set"))
     
-    -- Send configuration to NUI
-    SendNUIMessage({
+    -- Make sure NUI is ready
+    Wait(1000)
+    
+    -- Send configuration to NUI with proper websocket URL
+    local nuiMessage = {
         action = 'START_STREAM',
         streamId = config.streamId,
-        webrtcUrl = config.webrtcUrl,
+        streamKey = config.streamKey or config.streamId,
+        webSocketUrl = 'ws://localhost:3000/ws',  -- Force correct URL
         stunServer = config.stunServer,
         turnServer = config.turnServer,
         quality = Config.StreamQuality
-    })
+    }
+    
+    print("^2[Streamer]^7 Sending NUI message: " .. json.encode(nuiMessage))
+    SendNUIMessage(nuiMessage)
     
     -- Show notification
     ShowNotification("~g~Stream Started~s~")
@@ -37,6 +46,8 @@ AddEventHandler('redm_streamer:stopStream', function()
     if not isStreaming then
         return
     end
+    
+    print("^2[Streamer]^7 Stopping stream")
     
     isStreaming = false
     currentStreamId = nil
@@ -76,7 +87,8 @@ end)
 
 -- NUI Callbacks
 RegisterNUICallback('streamStarted', function(data, cb)
-    print("^2[Streamer]^7 NUI reports stream started")
+    print("^2[Streamer]^7 NUI reports stream started successfully")
+    print("^2[Streamer]^7 Stream Key: " .. (data.streamKey or "unknown"))
     cb('ok')
 end)
 
@@ -96,6 +108,11 @@ RegisterNUICallback('streamStats', function(data, cb)
     cb('ok')
 end)
 
+RegisterNUICallback('debugLog', function(data, cb)
+    print("^3[NUI Debug]^7 " .. (data.message or ""))
+    cb('ok')
+end)
+
 -- Commands
 RegisterCommand('stopstream', function()
     if isStreaming then
@@ -110,6 +127,26 @@ RegisterCommand('streamstats', function()
         TriggerServerEvent('redm_streamer:getStats')
     else
         ShowNotification("~r~Not streaming~s~")
+    end
+end, false)
+
+-- Debug command to manually trigger stream
+RegisterCommand('teststream', function()
+    if not isStreaming then
+        -- Manually trigger with test config
+        local testConfig = {
+            streamId = 'test_' .. GetGameTimer(),
+            streamKey = 'test_key_' .. GetGameTimer(),
+            webSocketUrl = 'ws://localhost:3000/ws',
+            stunServer = 'stun:stun.l.google.com:19302',
+            quality = {
+                width = 1920,
+                height = 1080,
+                fps = 30,
+                bitrate = 2500000
+            }
+        }
+        TriggerEvent('redm_streamer:startStream', testConfig)
     end
 end, false)
 

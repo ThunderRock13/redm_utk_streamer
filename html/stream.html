@@ -12,20 +12,50 @@
             background: transparent;
         }
         #stream-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1920px;
+            height: 1080px;
+            z-index: -1;
+            pointer-events: none;
+        }
+        #debug {
             position: fixed;
-            top: -9999px;
-            left: -9999px;
-            width: 1280px;
-            height: 720px;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            max-width: 300px;
+            display: none;
+            z-index: 9999;
         }
     </style>
 </head>
 <body>
-    <!-- Hidden canvas for game capture -->
-    <canvas id="stream-canvas"></canvas>
+    <!-- Canvas for game capture -->
+    <canvas id="stream-canvas" width="1920" height="1080"></canvas>
     
-    <!-- Load utk_render module -->
-    <script type="module" src="../script.js"></script>
-    <script src="stream.js"></script>
+    <!-- Debug panel -->
+    <div id="debug">
+        <div>Status: <span id="status">Idle</span></div>
+        <div>Stream: <span id="streamId">-</span></div>
+        <div>Viewers: <span id="viewerCount">0</span></div>
+        <div>FPS: <span id="fps">0</span></div>
+    </div>
+    
+    <!-- IMPORTANT: Load the utk_render script module first -->
+    <script type="module" src="nui://redm_streamer/script.js"></script>
+    <script>
+        // Wait for module to load
+        setTimeout(() => {
+            const script = document.createElement('script');
+            script.src = 'stream.js';
+            document.body.appendChild(script);
+        }, 1000);
+    </script>
 </body>
 </html>
