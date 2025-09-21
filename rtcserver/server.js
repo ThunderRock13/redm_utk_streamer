@@ -16,6 +16,13 @@ const API_KEY = process.env.API_KEY || 'redm-media-server-key-2024';
 app.use(cors());
 app.use(express.json());
 app.use('/player', express.static(path.join(__dirname, 'public')));
+
+// Serve monitor page specifically
+app.get('/monitor', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
+});
+
+// Serve static files for monitor assets
 app.use('/monitor', express.static(path.join(__dirname, 'public')));
 
 // WebSocket server for WebRTC signaling
@@ -30,6 +37,7 @@ const connections = new Map();
 const viewers = new Map();
 let playerList = [];
 let monitorConnections = new Set();
+let pendingStreamRequests = new Map(); // Store pending stream requests for polling
 
 // API authentication
 const authenticateAPI = (req, res, next) => {
@@ -38,6 +46,11 @@ const authenticateAPI = (req, res, next) => {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     next();
+};
+
+// WebSocket API key validation
+const validateWSApiKey = (data) => {
+    return data.apiKey === API_KEY;
 };
 
 // Health check
@@ -51,7 +64,7 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-// Create stream endpoint
+// Create stream endpoint (kept for backward compatibility)
 app.post('/api/streams/create', authenticateAPI, (req, res) => {
     const { streamId, playerId, playerName } = req.body;
     
@@ -86,7 +99,7 @@ app.post('/api/streams/create', authenticateAPI, (req, res) => {
         webSocketUrl,
         viewerUrl,
         stunServer: 'stun:stun.l.google.com:19302',
-        hlsUrl: viewerUrl // For compatibility
+        hlsUrl: viewerUrl
     });
 });
 
@@ -98,24 +111,7 @@ app.post('/api/streams/:streamId/stop', authenticateAPI, (req, res) => {
         return res.status(404).json({ error: 'Stream not found' });
     }
     
-    const stream = activeStreams.get(streamId);
-    
-    // Close all viewer connections
-    stream.viewerWsList.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'stream-ended' }));
-            ws.close();
-        }
-    });
-    
-    // Close streamer connection
-    if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
-        stream.streamerWs.close();
-    }
-    
-    activeStreams.delete(streamId);
-    console.log(`[Stream Stopped] ${streamId}`);
-    
+    stopStream(streamId);
     res.json({ success: true });
 });
 
@@ -140,7 +136,6 @@ app.get('/api/streams/:streamId/stats', authenticateAPI, (req, res) => {
 // Stream heartbeat
 app.post('/api/streams/:streamId/heartbeat', authenticateAPI, (req, res) => {
     const { streamId } = req.params;
-    console.log(streamId, activeStreams.get(streamId))
     const stream = activeStreams.get(streamId);
     
     if (stream) {
@@ -162,7 +157,7 @@ app.get('/api/streams', authenticateAPI, (req, res) => {
         viewerUrl: stream.viewerUrl,
         viewers: stream.viewerCount,
         duration: Date.now() - stream.startTime,
-        hlsUrl: stream.viewerUrl // For compatibility
+        hlsUrl: stream.viewerUrl
     }));
     
     res.json(streams);
@@ -173,13 +168,9 @@ app.post('/api/players/update', authenticateAPI, (req, res) => {
     playerList = req.body.players || [];
     
     // Broadcast to all monitor connections
-    connections.forEach((conn, clientId) => {
-        if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
-            conn.ws.send(JSON.stringify({
-                type: 'player-update',
-                players: playerList
-            }));
-        }
+    broadcastToMonitors({
+        type: 'player-update',
+        players: playerList
     });
     
     console.log(`[API] Player list updated: ${playerList.length} players`);
@@ -194,146 +185,63 @@ app.get('/api/players', authenticateAPI, (req, res) => {
     });
 });
 
-// Monitor stream request
-// Monitor stream request
-app.post('/api/monitor/stream', authenticateAPI, (req, res) => {
-    const { playerId, panelId } = req.body;
+// Polling endpoint for RedM server to check for pending stream requests
+app.get('/api/monitor/pending-requests', authenticateAPI, (req, res) => {
+    const requests = Array.from(pendingStreamRequests.values());
     
-    // Check if stream exists for this player
-    let existingStream = null;
-    activeStreams.forEach((stream, streamId) => {
-        if (stream.playerId == playerId) {
-            existingStream = stream;
-        }
-    });
-
-    if (existingStream) {
-        // Return existing stream
-        res.json({
-            success: true, 
-            streamId: existingStream.streamId, 
-            streamKey: existingStream.streamKey, 
-            playerName: existingStream.playerName, 
-            existing: true
-        });
-    } else {
-        // Create new stream request to game server
-        const streamId = require('uuid').v4();
-        const streamKey = require('uuid').v4();
-        const webSocketUrl = `ws://localhost:${PORT}/ws`;
-        const viewerUrl = `http://localhost:${PORT}/player/viewer.html?stream=${streamKey}`;
-        
-        // Create stream entry
-        activeStreams.set(streamId, {
-            streamId,
-            streamKey,
-            playerId,
-            playerName: `Player ${playerId}`, // This will be updated when stream starts
-            viewerUrl,
-            startTime: Date.now(),
-            viewerCount: 0,
-            stats: {},
-            streamerWs: null,
-            viewerWsList: [],
-            lastHeartbeat: Date.now(),
-            monitorRequested: true, // Mark as monitor-requested
-            panelId: panelId
-        });
-
-        // Notify all Lua servers about the monitor request via HTTP callback
-        // This assumes your Lua server has an HTTP endpoint listening
-        const http = require('http');
-        const postData = JSON.stringify({
-            type: 'monitor-stream-request',
-            playerId: playerId,
-            streamId: streamId,
-            streamKey: streamKey,
-            panelId: panelId
-        });
-
-        const options = {
-            hostname: 'localhost',
-            port: 30120, // Your FiveM/RedM server port
-            path: '/monitor-stream-request',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-            }
-        };
-
-        const luaReq = http.request(options, (luaRes) => {
-            console.log(`Lua server response: ${luaRes.statusCode}`);
-        });
-
-        luaReq.on('error', (err) => {
-            console.log('Could not reach Lua server directly, using alternative method');
-            
-            // Alternative: Broadcast via WebSocket to all connected monitor connections
-            // The Lua server should be listening for these messages
-            connections.forEach((conn, clientId) => {
-                if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
-                    conn.ws.send(JSON.stringify({
-                        type: 'lua-stream-request',
-                        playerId: playerId,
-                        streamId: streamId,
-                        streamKey: streamKey,
-                        panelId: panelId
-                    }));
-                }
-            });
-        });
-
-        luaReq.write(postData);
-        luaReq.end();
-
-        console.log(`Monitor: Creating new stream ${streamId} for player ${playerId}`);
-        
-        res.json({
-            success: true,
-            streamId: streamId,
-            streamKey: streamKey,
-            playerName: `Player ${playerId}`,
-            existing: false
+    if (requests.length > 0) {
+        console.log(`[Polling] Sending ${requests.length} pending stream requests to RedM server`);
+        requests.forEach(req => {
+            console.log(`[Polling] - Player ${req.playerId} (${req.playerName}) -> Panel ${req.panelId}`);
         });
     }
+    
+    // Clear the requests after sending them
+    pendingStreamRequests.clear();
+    
+    res.json({ 
+        requests: requests,
+        timestamp: Date.now()
+    });
 });
 
-
-// Monitor assign endpoint
-app.post('/api/monitor/assign', authenticateAPI, (req, res) => {
-    const { monitorId, streamId, streamKey, playerName, playerId } = req.body;
+// Endpoint for RedM server to confirm stream was started
+app.post('/api/monitor/stream-started', authenticateAPI, (req, res) => {
+    const { playerId, streamId, streamKey, panelId, playerName } = req.body;
     
-    console.log(`[Monitor] Assigning stream ${streamId} to monitor ${monitorId}`);
+    console.log(`[Monitor] Stream confirmed started: ${playerName} (${streamId}) in panel ${panelId}`);
     
-    // Notify monitor panels
-    connections.forEach((conn, clientId) => {
-        if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
-            conn.ws.send(JSON.stringify({
-                type: 'stream-assigned',
-                monitorId,
-                streamId,
-                streamKey,
-                playerName,
-                playerId
-            }));
-        }
+    // Broadcast to monitors that stream is ready
+    broadcastToMonitors({
+        type: 'stream-ready',
+        streamId: streamId,
+        streamKey: streamKey,
+        playerName: playerName,
+        playerId: playerId,
+        panelId: panelId
     });
     
     res.json({ success: true });
 });
 
-// Monitor stop stream
-app.post('/api/monitor/stop', authenticateAPI, (req, res) => {
-    const { playerId, panelId } = req.body;
+// Endpoint for RedM server to notify stream ended
+app.post('/api/monitor/stream-ended', authenticateAPI, (req, res) => {
+    const { playerId, streamId, streamKey, reason } = req.body;
     
-    console.log(`[Monitor] Stopping stream for player ${playerId} in panel ${panelId}`);
+    console.log(`[Monitor] Stream ended: Player ${playerId}, Stream ${streamId}, Reason: ${reason}`);
     
-    // Find and mark stream for cleanup
-    activeStreams.forEach((stream, streamId) => {
-        if (stream.playerId == playerId) {
-            stream.monitorStopped = true;
-        }
+    // Find and stop the stream
+    if (activeStreams.has(streamId)) {
+        stopStream(streamId);
+    }
+    
+    // Broadcast to monitors
+    broadcastToMonitors({
+        type: 'stream-ended',
+        streamKey: streamKey,
+        streamId: streamId,
+        playerId: playerId,
+        reason: reason
     });
     
     res.json({ success: true });
@@ -348,7 +256,6 @@ app.post('/webrtc/offer', async (req, res) => {
         return res.status(404).json({ error: 'Stream not found' });
     }
     
-    // Store the offer and wait for WebSocket connection
     const stream = activeStreams.get(streamId);
     stream.pendingOffer = offer;
     
@@ -360,6 +267,37 @@ app.post('/webrtc/offer', async (req, res) => {
     
     console.log(`[WebRTC] Offer received for stream ${streamId}`);
 });
+
+// Helper function to stop a stream
+function stopStream(streamId) {
+    const stream = activeStreams.get(streamId);
+    if (!stream) return;
+    
+    // Close all viewer connections
+    stream.viewerWsList.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'stream-ended' }));
+            ws.close();
+        }
+    });
+    
+    // Close streamer connection
+    if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
+        stream.streamerWs.close();
+    }
+    
+    activeStreams.delete(streamId);
+    console.log(`[Stream Stopped] ${streamId}`);
+}
+
+// Helper function to broadcast to all monitors
+function broadcastToMonitors(message) {
+    connections.forEach((conn, clientId) => {
+        if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
+            conn.ws.send(JSON.stringify(message));
+        }
+    });
+}
 
 // WebSocket handling
 wss.on('connection', (ws, req) => {
@@ -406,6 +344,19 @@ function handleWebSocketMessage(clientId, ws, data) {
         case 'register-monitor':
             handleMonitorRegistration(clientId, ws, data);
             break;
+
+        // Monitor-specific messages
+        case 'monitor-request-stream':
+            handleMonitorStreamRequest(clientId, ws, data);
+            break;
+
+        case 'monitor-stop-stream':
+            handleMonitorStopStream(clientId, ws, data);
+            break;
+
+        case 'monitor-get-players':
+            handleMonitorGetPlayers(clientId, ws, data);
+            break;
             
         case 'offer':
             handleOffer(clientId, data);
@@ -426,6 +377,187 @@ function handleWebSocketMessage(clientId, ws, data) {
         default:
             console.log(`[WS] Unknown message type: ${data.type}`);
     }
+}
+
+function handleMonitorRegistration(clientId, ws, data) {
+    // Validate API key for monitor registration
+    if (!validateWSApiKey(data)) {
+        ws.send(JSON.stringify({ 
+            type: 'error', 
+            message: 'Invalid API key' 
+        }));
+        ws.close();
+        return;
+    }
+
+    const connection = connections.get(clientId);
+    connection.role = 'monitor';
+    monitorConnections.add(clientId);
+    
+    ws.send(JSON.stringify({
+        type: 'registered', 
+        role: 'monitor'
+    }));
+    
+    // Send current player list
+    ws.send(JSON.stringify({
+        type: 'player-update', 
+        players: playerList
+    }));
+    
+    // Send current active streams
+    const streams = Array.from(activeStreams.values()).map(stream => ({
+        streamId: stream.streamId,
+        streamKey: stream.streamKey,
+        playerName: stream.playerName,
+        playerId: stream.playerId,
+        viewers: stream.viewerCount || 0
+    }));
+    ws.send(JSON.stringify({
+        type: 'active-streams', 
+        streams: streams
+    }));
+    
+    console.log(`[WS] Monitor registered: ${clientId}`);
+}
+
+function handleMonitorStreamRequest(clientId, ws, data) {
+    // Validate API key
+    if (!validateWSApiKey(data)) {
+        ws.send(JSON.stringify({ 
+            type: 'error', 
+            message: 'Invalid API key' 
+        }));
+        return;
+    }
+
+    const { playerId, panelId, playerName } = data;
+    
+    // Check if stream already exists for this player
+    let existingStream = null;
+    activeStreams.forEach((stream, streamId) => {
+        if (stream.playerId == playerId) {
+            existingStream = stream;
+        }
+    });
+
+    if (existingStream) {
+        // Return existing stream
+        ws.send(JSON.stringify({
+            type: 'stream-assigned',
+            panelId: panelId,
+            streamId: existingStream.streamId,
+            streamKey: existingStream.streamKey,
+            playerName: existingStream.playerName,
+            playerId: playerId
+        }));
+        console.log(`[Monitor] Existing stream assigned: ${existingStream.playerName} to panel ${panelId}`);
+    } else {
+        // Create new stream request for polling
+        const streamId = uuidv4();
+        const streamKey = uuidv4();
+        const requestId = uuidv4();
+        
+        // Store the request for RedM server to poll
+        pendingStreamRequests.set(requestId, {
+            playerId: playerId,
+            panelId: panelId,
+            playerName: playerName || `Player ${playerId}`,
+            streamId: streamId,
+            streamKey: streamKey,
+            timestamp: Date.now()
+        });
+
+        // Create stream entry (will be activated when RedM confirms)
+        activeStreams.set(streamId, {
+            streamId,
+            streamKey,
+            playerId,
+            playerName: playerName || `Player ${playerId}`,
+            viewerUrl: `http://localhost:${PORT}/player/viewer.html?stream=${streamKey}`,
+            startTime: Date.now(),
+            viewerCount: 0,
+            stats: {},
+            streamerWs: null,
+            viewerWsList: [],
+            lastHeartbeat: Date.now(),
+            monitorRequested: true,
+            panelId: panelId,
+            status: 'pending' // Mark as pending until confirmed
+        });
+
+        // Send assignment to monitor immediately
+        ws.send(JSON.stringify({
+            type: 'stream-assigned',
+            panelId: panelId,
+            streamId: streamId,
+            streamKey: streamKey,
+            playerName: playerName || `Player ${playerId}`,
+            playerId: playerId
+        }));
+
+        console.log(`[Monitor] Stream request queued: ${playerName} (${streamId}) for panel ${panelId}`);
+        console.log(`[Monitor] Pending requests: ${pendingStreamRequests.size}`);
+    }
+}
+
+function handleMonitorStopStream(clientId, ws, data) {
+    // Validate API key
+    if (!validateWSApiKey(data)) {
+        ws.send(JSON.stringify({ 
+            type: 'error', 
+            message: 'Invalid API key' 
+        }));
+        return;
+    }
+
+    const { playerId, panelId, streamKey } = data;
+    
+    console.log(`[Monitor] Stop stream requested: Player ${playerId}, Panel ${panelId}`);
+    
+    // Find and stop the stream
+    let streamToStop = null;
+    activeStreams.forEach((stream, streamId) => {
+        if (stream.playerId == playerId || stream.streamKey === streamKey) {
+            streamToStop = { streamId, stream };
+        }
+    });
+
+    if (streamToStop) {
+        const { streamId, stream } = streamToStop;
+        
+        // Stop the stream
+        stopStream(streamId);
+
+        // Notify monitor that stream stopped
+        broadcastToMonitors({
+            type: 'stream-stopped',
+            panelId: panelId,
+            playerId: playerId,
+            streamKey: streamKey
+        });
+
+        console.log(`[Monitor] Stream stopped: player ${playerId} in panel ${panelId}`);
+    } else {
+        console.log(`[Monitor] No stream found to stop for player ${playerId}`);
+    }
+}
+
+function handleMonitorGetPlayers(clientId, ws, data) {
+    // Validate API key
+    if (!validateWSApiKey(data)) {
+        ws.send(JSON.stringify({ 
+            type: 'error', 
+            message: 'Invalid API key' 
+        }));
+        return;
+    }
+
+    // Send current player list
+    ws.send(JSON.stringify({
+        type: 'player-update',
+        players: playerList
+    }));
 }
 
 function handleStreamerRegistration(clientId, ws, data) {
@@ -453,38 +585,29 @@ function handleStreamerRegistration(clientId, ws, data) {
     connection.role = 'streamer';
     connection.streamKey = streamKey;
     
-    // Check if this is a reconnection
-    const isReconnect = stream.streamerWs === null;
-    
     // Store streamer WebSocket
     stream.streamerWs = ws;
     
     ws.send(JSON.stringify({ 
         type: 'registered',
         role: 'streamer',
-        streamKey,
-        isReconnect 
+        streamKey
     }));
     
-    if (isReconnect) {
-        console.log(`[WS] Streamer reconnected for stream: ${stream.streamId}`);
-        
-        // Notify about existing viewers
-        if (stream.viewerWsList.length > 0) {
-            stream.viewerWsList.forEach((viewerWs, index) => {
-                ws.send(JSON.stringify({
-                    type: 'viewer-joined',
-                    viewerId: `viewer_${index}`
-                }));
-            });
-        }
-    } else {
-        console.log(`[WS] Streamer registered for stream: ${stream.streamId}`);
-    }
+    console.log(`[WS] Streamer registered for stream: ${stream.streamId}`);
+
+    // Notify monitors that stream is ready
+    broadcastToMonitors({
+        type: 'stream-ready',
+        streamId: stream.streamId,
+        streamKey: streamKey,
+        playerName: stream.playerName,
+        playerId: stream.playerId
+    });
 }
 
 function handleViewerRegistration(clientId, ws, data) {
-    const { streamKey } = data;
+    const { streamKey, panelId } = data;
     
     // Find stream by key
     let stream = null;
@@ -508,6 +631,14 @@ function handleViewerRegistration(clientId, ws, data) {
     connection.role = 'viewer';
     connection.streamKey = streamKey;
     
+    // Store panel ID properly (handle panelId: 0 correctly)
+    if (typeof panelId === 'number') {
+        connection.panelId = panelId;
+        console.log(`[WS] Viewer registered for panel ${panelId}, stream: ${stream.streamId}`);
+    } else {
+        console.log(`[WS] Viewer registered (no panel specified), stream: ${stream.streamId}`);
+    }
+    
     // Add to viewers list
     stream.viewerWsList.push(ws);
     stream.viewerCount++;
@@ -523,48 +654,14 @@ function handleViewerRegistration(clientId, ws, data) {
     if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
         stream.streamerWs.send(JSON.stringify({
             type: 'viewer-joined',
-            viewerId: clientId
+            viewerId: clientId,
+            panelId: panelId  // Include panelId in viewer-joined message
         }));
+        
+        console.log(`[WS] Notified streamer about new viewer ${clientId} for panel ${panelId}`);
     }
     
     console.log(`[WS] Viewer registered for stream: ${stream.streamId} (Total viewers: ${stream.viewerCount})`);
-}
-
-function handleMonitorRegistration(clientId, ws, data) {
-    const connection = connections.get(clientId);
-    connection.role = 'monitor';
-    monitorConnections.add(clientId);
-    
-    ws.send(JSON.stringify({type: 'registered', role: 'monitor'}));
-    
-    // Send current player list
-    ws.send(JSON.stringify({type: 'player-update', players: playerList}));
-    
-    // Send current active streams
-    const streams = Array.from(activeStreams.values()).map(stream => ({
-        streamId: stream.streamId,
-        streamKey: stream.streamKey,
-        playerName: stream.playerName,
-        playerId: stream.playerId,
-        viewers: stream.viewerCount || 0
-    }));
-    ws.send(JSON.stringify({type: 'active-streams', streams: streams}));
-    
-    console.log(`[WS] Monitor registered: ${clientId}`);
-    
-    // Handle monitor-initiated stream requests
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            if (data.type === 'lua-stream-request') {
-                // Forward to Lua server via your preferred method
-                console.log(`[Monitor] Forwarding stream request for player ${data.playerId}`);
-                // You can trigger the Lua event here if you have a bridge
-            }
-        } catch (error) {
-            console.error(`[WS] Error parsing monitor message:`, error);
-        }
-    });
 }
 
 function handleOffer(clientId, data) {
@@ -590,11 +687,19 @@ function handleOffer(clientId, data) {
         // Find viewer and send offer
         for (const [vid, vconn] of connections) {
             if (vid === data.viewerId && vconn.role === 'viewer') {
-                vconn.ws.send(JSON.stringify({
+                const offerMessage = {
                     type: 'offer',
                     offer: data.offer,
                     streamerId: clientId
-                }));
+                };
+                
+                // Include panelId if available (handle panelId: 0 correctly)
+                if (typeof vconn.panelId === 'number') {
+                    offerMessage.panelId = vconn.panelId;
+                }
+                
+                console.log(`[WebRTC] Sending offer to viewer ${vid} (panel ${vconn.panelId})`);
+                vconn.ws.send(JSON.stringify(offerMessage));
                 break;
             }
         }
@@ -619,12 +724,21 @@ function handleAnswer(clientId, data) {
     
     if (!stream || !stream.streamerWs) return;
     
-    // Forward answer to streamer
-    stream.streamerWs.send(JSON.stringify({
+    const answerMessage = {
         type: 'answer',
         answer: data.answer,
         viewerId: clientId
-    }));
+    };
+    
+    // Include panelId if available (handle panelId: 0 correctly)
+    if (typeof connection.panelId === 'number') {
+        answerMessage.panelId = connection.panelId;
+    }
+    
+    console.log(`[WebRTC] Sending answer from viewer ${clientId} (panel ${connection.panelId})`);
+    
+    // Forward answer to streamer
+    stream.streamerWs.send(JSON.stringify(answerMessage));
 }
 
 function handleIceCandidate(clientId, data) {
@@ -650,22 +764,39 @@ function handleIceCandidate(clientId, data) {
         // Send to specific viewer
         for (const [vid, vconn] of connections) {
             if (vid === data.viewerId && vconn.role === 'viewer') {
-                vconn.ws.send(JSON.stringify({
+                const candidateMessage = {
                     type: 'ice-candidate',
                     candidate: data.candidate,
                     from: 'streamer'
-                }));
+                };
+                
+                // Include panelId if available (handle panelId: 0 correctly)
+                if (typeof vconn.panelId === 'number') {
+                    candidateMessage.panelId = vconn.panelId;
+                }
+                
+                console.log(`[WebRTC] Sending ICE candidate to viewer ${vid} (panel ${vconn.panelId})`);
+                vconn.ws.send(JSON.stringify(candidateMessage));
                 break;
             }
         }
     } else if (connection.role === 'viewer' && stream.streamerWs) {
-        // Send to streamer
-        stream.streamerWs.send(JSON.stringify({
+        const candidateMessage = {
             type: 'ice-candidate',
             candidate: data.candidate,
             viewerId: clientId,
             from: 'viewer'
-        }));
+        };
+        
+        // Include panelId if available (handle panelId: 0 correctly)
+        if (typeof connection.panelId === 'number') {
+            candidateMessage.panelId = connection.panelId;
+        }
+        
+        console.log(`[WebRTC] Sending ICE candidate from viewer ${clientId} (panel ${connection.panelId})`);
+        
+        // Send to streamer
+        stream.streamerWs.send(JSON.stringify(candidateMessage));
     }
 }
 
@@ -685,7 +816,8 @@ function handleDisconnect(clientId) {
                 if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
                     stream.streamerWs.send(JSON.stringify({
                         type: 'viewer-left',
-                        viewerId: clientId
+                        viewerId: clientId,
+                        panelId: connection.panelId
                     }));
                 }
                 
@@ -702,6 +834,14 @@ function handleDisconnect(clientId) {
                 stream.streamerWs = null;
                 console.log(`[WS] Streamer disconnected from stream: ${stream.streamId}`);
                 
+                // Notify monitors that stream ended
+                broadcastToMonitors({
+                    type: 'stream-ended',
+                    streamKey: stream.streamKey,
+                    streamId: id,
+                    playerId: stream.playerId
+                });
+                
                 // Give 30 seconds to reconnect before ending stream
                 setTimeout(() => {
                     if (!stream.streamerWs) {
@@ -712,7 +852,7 @@ function handleDisconnect(clientId) {
                             }
                         });
                         
-                        activeStreams.delete(id);
+                        stopStream(id);
                         console.log(`[WS] Stream ended due to timeout: ${stream.streamId}`);
                     }
                 }, 30000);
@@ -738,21 +878,15 @@ setInterval(() => {
         if (stream.lastHeartbeat && (now - stream.lastHeartbeat > timeout)) {
             console.log(`[Cleanup] Removing inactive stream: ${streamId}`);
             
-            // Notify viewers
-            stream.viewerWsList?.forEach(ws => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'stream-ended' }));
-                }
+            // Notify monitors
+            broadcastToMonitors({
+                type: 'stream-ended',
+                streamKey: stream.streamKey,
+                streamId: streamId,
+                playerId: stream.playerId
             });
             
-            // Remove stream
-            activeStreams.delete(streamId);
-        }
-        
-        // Check if monitor stopped it
-        if (stream.monitorStopped) {
-            console.log(`[Cleanup] Removing monitor-stopped stream: ${streamId}`);
-            activeStreams.delete(streamId);
+            stopStream(streamId);
         }
     });
 }, 30000);
@@ -773,6 +907,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`[Media Server] Health: http://localhost:${PORT}/api/health`);
     console.log(`[Media Server] Player: http://localhost:${PORT}/player/`);
     console.log(`[Media Server] Monitor: http://localhost:${PORT}/monitor`);
+    console.log(`[Media Server] API Key: ${API_KEY}`);
     console.log(`=====================================`);
 });
 

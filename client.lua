@@ -6,8 +6,9 @@ local streamConfig = nil
 RegisterNetEvent('redm_streamer:startStream')
 AddEventHandler('redm_streamer:startStream', function(config)
     if isStreaming then
-        print("^1[Streamer]^7 Already streaming")
-        return
+        print("^1[Streamer]^7 Already streaming, stopping first")
+        TriggerEvent('redm_streamer:stopStream')
+        Wait(2000) -- Give time for cleanup
     end
     
     isStreaming = true
@@ -26,8 +27,8 @@ AddEventHandler('redm_streamer:startStream', function(config)
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        webSocketUrl = 'ws://localhost:3000/ws',  -- Force correct URL
-        stunServer = config.stunServer,
+        webSocketUrl = config.webSocketUrl or 'ws://localhost:3000/ws',
+        stunServer = config.stunServer or 'stun:stun.l.google.com:19302',
         turnServer = config.turnServer,
         quality = Config.StreamQuality
     }
@@ -38,16 +39,33 @@ AddEventHandler('redm_streamer:startStream', function(config)
     -- Show notification
     ShowNotification("~g~Stream Started~s~")
     ShowNotification("ID: " .. config.streamId)
+    
+    -- Update server with stream start
+    TriggerServerEvent('redm_streamer:updateStats', {
+        status = 'started',
+        streamId = config.streamId,
+        timestamp = GetGameTimer()
+    })
 end)
 
 -- Stop streaming
 RegisterNetEvent('redm_streamer:stopStream')
 AddEventHandler('redm_streamer:stopStream', function()
     if not isStreaming then
+        print("^3[Streamer]^7 Not streaming, ignoring stop request")
         return
     end
     
     print("^2[Streamer]^7 Stopping stream")
+    
+    -- Update server with stream stop
+    if currentStreamId then
+        TriggerServerEvent('redm_streamer:updateStats', {
+            status = 'stopped',
+            streamId = currentStreamId,
+            timestamp = GetGameTimer()
+        })
+    end
     
     isStreaming = false
     currentStreamId = nil
@@ -77,6 +95,7 @@ AddEventHandler('redm_streamer:stats', function(stats)
     print("Viewers: " .. (stats.viewers or 0))
     print("Bitrate: " .. (stats.bitrate or 0) .. " kbps")
     print("FPS: " .. (stats.fps or 0))
+    print("Duration: " .. (stats.duration or 0) .. "ms")
 end)
 
 -- Notification
@@ -89,21 +108,47 @@ end)
 RegisterNUICallback('streamStarted', function(data, cb)
     print("^2[Streamer]^7 NUI reports stream started successfully")
     print("^2[Streamer]^7 Stream Key: " .. (data.streamKey or "unknown"))
+    
+    -- Notify server that stream is ready
+    TriggerServerEvent('redm_streamer:updateStats', {
+        status = 'connected',
+        streamId = data.streamId or currentStreamId,
+        streamKey = data.streamKey,
+        timestamp = GetGameTimer()
+    })
+    
     cb('ok')
 end)
 
 RegisterNUICallback('streamError', function(data, cb)
     print("^1[Streamer]^7 Stream error: " .. (data.error or "unknown"))
+    
+    -- Notify server about error
+    TriggerServerEvent('redm_streamer:updateStats', {
+        status = 'error',
+        error = data.error,
+        streamId = currentStreamId,
+        timestamp = GetGameTimer()
+    })
+    
+    -- Auto-stop on error
     if isStreaming then
-        TriggerServerEvent('redm_streamer:stopStream')
+        TriggerEvent('redm_streamer:stopStream')
     end
+    
     cb('ok')
 end)
 
 RegisterNUICallback('streamStats', function(data, cb)
-    -- Forward stats to server
+    -- Forward stats to server with additional info
     if isStreaming then
-        TriggerServerEvent('redm_streamer:updateStats', data)
+        local enhancedStats = data or {}
+        enhancedStats.playerId = GetPlayerServerId(PlayerId())
+        enhancedStats.playerName = GetPlayerName(PlayerId())
+        enhancedStats.streamId = currentStreamId
+        enhancedStats.timestamp = GetGameTimer()
+        
+        TriggerServerEvent('redm_streamer:updateStats', enhancedStats)
     end
     cb('ok')
 end)
@@ -130,25 +175,59 @@ RegisterCommand('streamstats', function()
     end
 end, false)
 
--- Debug command to manually trigger stream
+-- Debug command to manually trigger stream (for testing)
 RegisterCommand('teststream', function()
     if not isStreaming then
-        -- Manually trigger with test config
         local testConfig = {
             streamId = 'test_' .. GetGameTimer(),
             streamKey = 'test_key_' .. GetGameTimer(),
             webSocketUrl = 'ws://localhost:3000/ws',
             stunServer = 'stun:stun.l.google.com:19302',
-            quality = {
-                width = 1920,
-                height = 1080,
-                fps = 30,
-                bitrate = 2500000
-            }
+            quality = Config.StreamQuality
         }
         TriggerEvent('redm_streamer:startStream', testConfig)
+    else
+        ShowNotification("~r~Already streaming~s~")
     end
 end, false)
+
+-- Check stream status command
+RegisterCommand('streamstatus', function()
+    if isStreaming then
+        ShowNotification("~g~Streaming: " .. (currentStreamId or "Unknown"))
+        print("^2[Stream Status]^7 Currently streaming:")
+        print("Stream ID: " .. (currentStreamId or "Unknown"))
+        print("Stream Key: " .. (streamConfig and streamConfig.streamKey or "Unknown"))
+        print("WebSocket: " .. (streamConfig and streamConfig.webSocketUrl or "Unknown"))
+    else
+        ShowNotification("~r~Not streaming~s~")
+        print("^3[Stream Status]^7 Not currently streaming")
+    end
+end, false)
+
+-- Auto-cleanup on resource restart
+AddEventHandler('onResourceStop', function(resourceName)
+    if GetCurrentResourceName() == resourceName and isStreaming then
+        print("^3[Cleanup]^7 Resource stopping, cleaning up stream")
+        TriggerServerEvent('redm_streamer:stopStream')
+    end
+end)
+
+-- Heartbeat to keep stream alive
+CreateThread(function()
+    while true do
+        Wait(30000) -- Every 30 seconds
+        
+        if isStreaming and currentStreamId then
+            TriggerServerEvent('redm_streamer:updateStats', {
+                status = 'heartbeat',
+                streamId = currentStreamId,
+                timestamp = GetGameTimer(),
+                uptime = GetGameTimer()
+            })
+        end
+    end
+end)
 
 -- Helper function for notifications
 function ShowNotification(text)
@@ -157,16 +236,33 @@ function ShowNotification(text)
     Citizen.InvokeNative(0xE9990552DEC71600)
 end
 
--- Export functions
+-- Export functions for other resources
 function StartStreamingExport(playerId)
-    TriggerServerEvent('redm_streamer:requestStream', playerId)
+    if playerId then
+        TriggerServerEvent('redm_streamer:requestStream', playerId)
+    else
+        ShowNotification("~r~Invalid player ID~s~")
+    end
 end
 
 function StopStreamingExport()
     if isStreaming then
         TriggerServerEvent('redm_streamer:stopStream')
+    else
+        ShowNotification("~r~Not streaming~s~")
     end
 end
 
+function GetStreamStatusExport()
+    return {
+        isStreaming = isStreaming,
+        streamId = currentStreamId,
+        config = streamConfig
+    }
+end
+
+-- Exports
 exports('startStreaming', StartStreamingExport)
 exports('stopStreaming', StopStreamingExport)
+exports('getStreamStatus', GetStreamStatusExport)
+exports('isStreaming', function() return isStreaming end)

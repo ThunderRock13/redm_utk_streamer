@@ -1,5 +1,6 @@
 local activeStreams = {}
 local streamStats = {}
+local pendingStreamRequests = {}
 
 -- Helper function for media server API calls
 local function CallMediaServer(endpoint, method, data, callback)
@@ -22,20 +23,89 @@ local function CallMediaServer(endpoint, method, data, callback)
     end, method, data and json.encode(data) or "{}", headers)
 end
 
--- Initialize
+-- Initialize and start polling for stream requests
 CreateThread(function()
     Wait(5000)
     CallMediaServer("/health", "GET", nil, function(success, data)
         if success then
             print("^2[RedM Streamer]^7 Connected to media server")
+            -- Start polling for stream requests
+            CreateThread(function()
+                while true do
+                    Wait(2000) -- Poll every 2 seconds
+                    PollForStreamRequests()
+                end
+            end)
         else
             print("^1[RedM Streamer]^7 Media server not available")
         end
     end)
 end)
 
--- Start stream request (from admin or other resource)
--- In your server.lua, find the requestStream handler and make sure it includes streamKey:
+-- Poll for stream requests from the media server
+function PollForStreamRequests()
+    CallMediaServer("/monitor/pending-requests", "GET", nil, function(success, data)
+        if success and data and data.requests then
+            for _, request in ipairs(data.requests) do
+                HandleStreamRequest(request)
+            end
+        end
+    end)
+end
+
+-- Handle a stream request
+function HandleStreamRequest(request)
+    local playerId = tonumber(request.playerId)
+    local streamId = request.streamId
+    local streamKey = request.streamKey
+    local panelId = request.panelId
+    
+    if not GetPlayerName(playerId) then
+        print(string.format("^1[Stream Request]^7 Player %d not found", playerId))
+        return
+    end
+    
+    -- Check if already streaming
+    if activeStreams[playerId] then
+        print(string.format("^3[Stream Request]^7 Player %d already streaming", playerId))
+        return
+    end
+    
+    print(string.format("^2[Stream Request]^7 Starting stream for player %d (ID: %s)", playerId, streamId))
+    
+    -- Create stream entry
+    activeStreams[playerId] = {
+        streamId = streamId,
+        streamKey = streamKey,
+        webrtcEndpoint = 'http://localhost:3000/webrtc',
+        hlsUrl = string.format('http://localhost:3000/player/viewer.html?stream=%s', streamKey),
+        startTime = os.time(),
+        viewers = 0,
+        panelId = panelId
+    }
+    
+    -- Tell player to start streaming
+    TriggerClientEvent('redm_streamer:startStream', playerId, {
+        streamId = streamId,
+        streamKey = streamKey,
+        webrtcUrl = 'http://localhost:3000/webrtc',
+        webSocketUrl = 'ws://localhost:3000/ws',
+        stunServer = 'stun:stun.l.google.com:19302'
+    })
+    
+    -- Notify media server that stream was started
+    CallMediaServer("/monitor/stream-started", "POST", {
+        playerId = playerId,
+        streamId = streamId,
+        streamKey = streamKey,
+        panelId = panelId,
+        playerName = GetPlayerName(playerId)
+    })
+    
+    print(string.format("^2[Stream Request]^7 Stream started for %s", GetPlayerName(playerId)))
+end
+
+-- Existing playerList tracking
 local playerList = {}
 CreateThread(function()
     while true do
@@ -59,7 +129,7 @@ CreateThread(function()
         
         playerList = players
         
-        -- Send to all connected monitoring panels via media server
+        -- Send to media server
         if #players > 0 then
             CallMediaServer("/players/update", "POST", {
                 players = players,
@@ -70,20 +140,27 @@ CreateThread(function()
         -- Clean up dead streams
         for playerId, stream in pairs(activeStreams) do
             if not GetPlayerName(playerId) then
-                -- Player disconnected, clean up stream
                 print(string.format("^3[Cleanup]^7 Removing dead stream for disconnected player %d", playerId))
                 
-                CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
+                -- Notify media server
+                CallMediaServer("/monitor/stream-ended", "POST", {
+                    playerId = playerId,
+                    streamId = stream.streamId,
+                    streamKey = stream.streamKey,
+                    reason = "player_disconnected"
+                })
+                
                 activeStreams[playerId] = nil
             end
         end
     end
 end)
+
+-- Handle manual stream requests (existing functionality)
 RegisterNetEvent('redm_streamer:requestStream')
 AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorId)
     local source = source
     
-    -- Special handling for monitor panel requests
     if source == 0 or monitorId then
         source = -1 -- Monitor request
     end
@@ -96,11 +173,8 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
     end
     
     if activeStreams[targetPlayerId] then
-        -- Stream already exists, just return the info
         local stream = activeStreams[targetPlayerId]
-        
         if monitorId then
-            -- Send stream info to monitor
             CallMediaServer("/monitor/assign", "POST", {
                 monitorId = monitorId,
                 streamId = stream.streamId,
@@ -109,14 +183,12 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
                 playerId = targetPlayerId
             })
         end
-        
         print(string.format("^2[Monitor]^7 Existing stream assigned to monitor %s", monitorId or "none"))
         return
     end
     
     local streamId = GenerateStreamId()
     
-    -- Create stream on media server
     CallMediaServer("/streams/create", "POST", {
         streamId = streamId,
         playerId = targetPlayerId,
@@ -135,7 +207,6 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
                 monitorId = monitorId
             }
             
-            -- Tell player to start streaming
             TriggerClientEvent('redm_streamer:startStream', targetPlayerId, {
                 streamId = streamId,
                 streamKey = data.streamKey,
@@ -151,64 +222,23 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
         end
     end)
 end)
--- Add this event handler for monitor-initiated stream requests
-RegisterNetEvent('redm-streamer:monitorStreamRequest')
-AddEventHandler('redm-streamer:monitorStreamRequest', function(data)
-    local playerId = tonumber(data.playerId)
-    local streamId = data.streamId
-    local streamKey = data.streamKey
-    local panelId = data.panelId
-    
-    print(string.format("[Monitor] Stream request for player %d via monitor panel %s", playerId, panelId))
-    
-    -- Check if player exists
-    if not GetPlayerName(playerId) then
-        print(string.format("[Monitor] Player %d not found", playerId))
-        return
-    end
-    
-    -- Create stream entry
-    activeStreams[playerId] = {
-        streamId = streamId,
-        streamKey = streamKey,
-        webrtcEndpoint = 'http://localhost:3000/webrtc',
-        hlsUrl = string.format('http://localhost:3000/player/viewer.html?stream=%s', streamKey),
-        startTime = os.time(),
-        viewers = 0,
-        monitorId = panelId
-    }
-    
-    -- Tell player to start streaming
-    TriggerClientEvent('redm-streamer:startStream', playerId, {
-        streamId = streamId,
-        streamKey = streamKey,
-        webrtcUrl = 'http://localhost:3000/webrtc',
-        webSocketUrl = 'ws://localhost:3000/ws',
-        stunServer = 'stun:stun.l.google.com:19302'
-    })
-    
-    print(string.format("[Monitor] Stream started for player %s (ID: %s)", GetPlayerName(playerId), streamId))
-end)
 
--- Add WebSocket message handler for monitor requests
--- If you have a WebSocket connection to the media server, add this:
-RegisterCommand('monitor-ws-handler', function()
-    -- This would handle WebSocket messages from the media server
-    -- Implementation depends on your WebSocket setup
-end, false)
-
+-- Stop stream
 RegisterNetEvent('redm_streamer:stopStream')
 AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
     local source = source
-    
-    -- Allow stopping by player ID
     local playerId = targetPlayerId or source
     
     if activeStreams[playerId] then
         local stream = activeStreams[playerId]
         
-        -- Tell media server to stop
-        CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
+        -- Notify media server
+        CallMediaServer("/monitor/stream-ended", "POST", {
+            playerId = playerId,
+            streamId = stream.streamId,
+            streamKey = stream.streamKey,
+            reason = "manual_stop"
+        })
         
         -- Notify player
         TriggerClientEvent('redm_streamer:stopStream', playerId)
@@ -219,6 +249,7 @@ AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
         print(string.format("^2[Monitor]^7 Stream stopped for player %d", playerId))
     end
 end)
+
 -- Get stream stats
 RegisterNetEvent('redm_streamer:getStats')
 AddEventHandler('redm_streamer:getStats', function()
@@ -276,32 +307,6 @@ RegisterCommand('streams', function(source)
     end
 end, false)
 
-RegisterNetEvent('redm_streamer:getMonitorData')
-AddEventHandler('redm_streamer:getMonitorData', function()
-    local source = source
-    local data = {
-        players = playerList,
-        streams = {}
-    }
-    
-    for playerId, stream in pairs(activeStreams) do
-        table.insert(data.streams, {
-            playerId = playerId,
-            playerName = GetPlayerName(playerId),
-            streamId = stream.streamId,
-            streamKey = stream.streamKey,
-            duration = os.time() - stream.startTime,
-            viewers = stream.viewers
-        })
-    end
-    
-    if source > 0 then
-        TriggerClientEvent('redm_streamer:monitorData', source, data)
-    else
-        print(json.encode(data))
-    end
-end)
-
 -- Monitor commands
 RegisterCommand('monitor', function(source, args)
     if source == 0 then
@@ -315,7 +320,6 @@ end, false)
 AddEventHandler('playerDropped', function()
     local playerId = source
     
-    -- Clean up stream if exists
     if activeStreams[playerId] then
         local stream = activeStreams[playerId]
         
@@ -324,7 +328,12 @@ AddEventHandler('playerDropped', function()
         -- Give 10 seconds for reconnect
         SetTimeout(10000, function()
             if activeStreams[playerId] and activeStreams[playerId].streamId == stream.streamId then
-                CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
+                CallMediaServer("/monitor/stream-ended", "POST", {
+                    playerId = playerId,
+                    streamId = stream.streamId,
+                    streamKey = stream.streamKey,
+                    reason = "player_disconnected"
+                })
                 activeStreams[playerId] = nil
                 print(string.format("^3[Cleanup]^7 Stream %s cleaned after timeout", stream.streamId))
             end
@@ -338,10 +347,14 @@ CreateThread(function()
         Wait(30000) -- Every 30 seconds
         
         for playerId, stream in pairs(activeStreams) do
-            -- Check if player still exists
             if not GetPlayerName(playerId) then
                 print(string.format("^3[Cleanup]^7 Removing orphaned stream %s", stream.streamId))
-                CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST")
+                CallMediaServer("/monitor/stream-ended", "POST", {
+                    playerId = playerId,
+                    streamId = stream.streamId,
+                    streamKey = stream.streamKey,
+                    reason = "player_not_found"
+                })
                 activeStreams[playerId] = nil
             else
                 -- Update stream stats
@@ -363,24 +376,4 @@ function GenerateStreamId()
         streamId = streamId .. string.sub(chars, randIndex, randIndex)
     end
     return streamId
-end
-
-function CallMediaServer(endpoint, method, data, callback)
-    local url = Config.MediaServer.api_url .. endpoint
-    local headers = {
-        ["Content-Type"] = "application/json",
-        ["X-API-Key"] = Config.MediaServer.api_key
-    }
-    
-    PerformHttpRequest(url, function(statusCode, response, headers)
-        if Config.Debug then
-            print(string.format("^2[Media Server]^7 %s %s - Status: %d, Response: %s", method, url, statusCode, response and response or nil))
-        end
-        
-        if callback then
-            local success = statusCode == 200 or statusCode == 201
-            local responseData = response and json.decode(response) or nil
-            callback(success, responseData)
-        end
-    end, method, data and json.encode(data) or "{}", headers)
 end
