@@ -15,23 +15,14 @@ let webrtcConfig = null;
 // WebSocket streaming fallback
 let wsStreamingEnabled = false;
 let wsStreamingInterval = null;
-console.log('[Stream.js] Script loaded at', new Date().toISOString());
 
 // Debug mode
-const DEBUG = true;
+const DEBUG = false;
 function debugLog(message) {
-    console.log('[Stream]', message);
-    fetch(`https://${GetParentResourceName()}/debugLog`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: message })
-    });
+    // Silent debug logging
 }
 function log(...args) {
-    if (DEBUG) {
-        console.log('[Stream]', ...args);
-        updateDebug('status', args.join(' '));
-    }
+    // Completely silent - no logging at all
 }
 
 // Load WebRTC configuration from server for firewall-free streaming
@@ -40,20 +31,14 @@ async function loadWebRTCConfig() {
         const response = await fetch('http://localhost:3000/api/webrtc/config');
         if (response.ok) {
             webrtcConfig = await response.json();
-            log('WebRTC config loaded:', {
-                turnEnabled: webrtcConfig.turnEnabled,
-                forceRelayOnly: webrtcConfig.forceRelayOnly,
-                iceServersCount: webrtcConfig.iceServers.length
-            });
-            if (webrtcConfig.forceRelayOnly) {
-                log('🛡️ Firewall-free mode: Using relay-only WebRTC connections');
-            }
+            // WebRTC config loaded
+            // Firewall-free mode check
         } else {
-            log('Failed to load WebRTC config, using defaults');
+            // Failed to load WebRTC config, using defaults
             webrtcConfig = getDefaultWebRTCConfig();
         }
     } catch (error) {
-        log('Error loading WebRTC config, using defaults:', error);
+        // Error loading WebRTC config, using defaults
         webrtcConfig = getDefaultWebRTCConfig();
     }
 }
@@ -80,15 +65,15 @@ function updateDebug(field, value) {
 window.addEventListener('message', async (event) => {
     const data = event.data;
     
-    debugLog('Received message: ' + data.action);
+    // Received message
     
     switch(data.action) {
         case 'START_STREAM':
-            debugLog('START_STREAM config: ' + JSON.stringify(data));
+            // START_STREAM config received
             await startStream(data);
             break;
         case 'STOP_STREAM':
-            debugLog('STOP_STREAM received');
+            // STOP_STREAM received
             stopStream();
             break;
     }
@@ -147,9 +132,7 @@ class CfxGameViewRenderer {
       return;
     }
 
-    console.error('Link failed:', gl.getProgramInfoLog(program));
-    console.error('vs log:', gl.getShaderInfoLog(vs));
-    console.error('fs log:', gl.getShaderInfoLog(fs));
+    // Link failed
 
     throw new Error('Failed to compile shaders');
   }
@@ -268,10 +251,10 @@ class CfxGameViewRenderer {
 }
 
 async function startStream(config) {
-    log('Starting stream:', config.streamId);
+    // Starting stream
 
     if (isStreaming) {
-        log('Already streaming, stopping first');
+        // Already streaming, stopping first
         stopStream();
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -301,12 +284,12 @@ async function startStream(config) {
         try {
             // Method 1: Direct canvas capture
             localStream = canvas.captureStream(30);
-            log('Using canvas.captureStream');
+            // Using canvas.captureStream
         } catch (e1) {
             try {
                 // Method 2: Mozilla prefix
                 localStream = canvas.mozCaptureStream(30);
-                log('Using canvas.mozCaptureStream');
+                // Using canvas.mozCaptureStream
             } catch (e2) {
             }
         }
@@ -315,7 +298,7 @@ async function startStream(config) {
         const videoTracks = localStream.getVideoTracks();
         const audioTracks = localStream.getAudioTracks();
         
-        log(`Stream tracks - Video: ${videoTracks.length}, Audio: ${audioTracks.length}`);
+        // Stream tracks checked
         
         if (videoTracks.length === 0) {
             // Try to create a test pattern if no video
@@ -327,7 +310,7 @@ async function startStream(config) {
             if (newTracks.length === 0) {
                 throw new Error('No video track available');
             }
-            log('Using test pattern as fallback');
+            // Using test pattern as fallback
         }
         
         // Connect to signaling server
@@ -337,8 +320,7 @@ async function startStream(config) {
         startFPSMonitoring(canvas);
         
     } catch (error) {
-        console.error('[Stream] Error:', error);
-        log('Error: ' + error.message);
+        // Stream error occurred
         notifyError(error.message);
         stopStream();
     }
@@ -372,7 +354,7 @@ function connectToSignalingServer(config) {
     const wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
     const streamKey = config.streamKey || config.streamId;
     
-    debugLog('Connecting to: ' + wsUrl + ' with key: ' + streamKey);
+    // Connecting to WebSocket
     
     if (ws) {
         ws.close();
@@ -381,12 +363,12 @@ function connectToSignalingServer(config) {
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-        log('WebSocket connected');
+        // WebSocket connected
         clearReconnectTimer();
         
         // Register as streamer with validation
         const streamKey = config.streamKey || config.streamId;
-        log('Registering with stream key:', streamKey);
+        // Registering with stream key
 
         ws.send(JSON.stringify({
             type: 'register-streamer',
@@ -399,16 +381,16 @@ function connectToSignalingServer(config) {
     
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        log('WebSocket message received:', data.type);
+        // WebSocket message received
 
         switch(data.type) {
             case 'registered':
-                log('Registered as streamer');
+                // Registered as streamer
                 notifyStreamStarted();
                 break;
 
             case 'viewer-joined':
-                log('Viewer joined message received:', data);
+                // Viewer joined
                 await handleViewerJoined(data.viewerId);
                 updateDebug('viewerCount', viewers.size);
                 break;
@@ -427,8 +409,7 @@ function connectToSignalingServer(config) {
                 break;
 
             case 'force-stop':
-                log('Received force stop command from server:', data);
-                log('Force stop reason:', data.reason || 'no reason provided');
+                // Received force stop command
                 notifyError('Stream stopped by server: ' + (data.reason || 'unknown reason'));
                 stopStream();
                 break;
@@ -438,50 +419,45 @@ function connectToSignalingServer(config) {
                 break;
 
             case 'error':
-                log('Server error:', data.message);
+                // Server error
 
                 // Handle specific error cases
                 if (data.message && data.message.includes('Invalid stream key')) {
-                    log('Stream key rejected by server. Stopping stream.');
+                    // Stream key rejected
                     notifyError('Invalid stream key: ' + (streamConfig?.streamKey || streamConfig?.streamId));
                     stopStream();
                 }
                 break;
 
             case 'request-ws-streaming':
-                log('WebSocket streaming requested for fallback');
+                // WebSocket streaming requested
                 enableWebSocketStreaming();
                 break;
 
             case 'stop-ws-streaming':
-                log('Stopping WebSocket streaming');
+                // Stopping WebSocket streaming
                 disableWebSocketStreaming();
                 break;
         }
     };
     
     ws.onerror = (error) => {
-        log('WebSocket error');
-        console.error('[Stream] WebSocket error:', error);
+        // WebSocket error
     };
     
     ws.onclose = (event) => {
-        log('WebSocket closed:', event.code, event.reason);
+        // WebSocket closed
         stopHeartbeat();
 
         // Handle different close codes
-        if (event.code === 1005) {
-            log('Connection closed without status - checking server availability');
-        } else if (event.code === 1006) {
-            log('Connection closed abnormally - network issue');
-        }
+        // Connection closed - checking codes
 
         // Only reconnect if it wasn't a deliberate close (code 1000)
         if (isStreaming && event.code !== 1000) {
-            log('Unexpected disconnect, attempting reconnect...');
+            // Unexpected disconnect, attempting reconnect
             scheduleReconnect();
         } else if (event.code === 1000) {
-            log('Connection closed deliberately, stopping stream');
+            // Connection closed deliberately
             stopStream();
         }
     };
@@ -511,15 +487,15 @@ function scheduleReconnect() {
     
     const tryReconnect = () => {
         if (!isStreaming || !streamConfig) {
-            log('Stream stopped, canceling reconnect');
+            // Stream stopped, canceling reconnect
             return;
         }
         
         attempts++;
-        log(`Reconnect attempt ${attempts}/${maxAttempts}`);
+        // Reconnect attempt
         
         if (attempts > maxAttempts) {
-            log('Max reconnect attempts reached');
+            // Max reconnect attempts reached
             notifyError('Failed to reconnect to server');
             stopStream();
             return;
@@ -542,9 +518,7 @@ function clearReconnectTimer() {
 }
 
 async function handleViewerJoined(viewerId) {
-    log('Viewer joined:', viewerId);
-    log('Local stream available:', !!localStream);
-    log('Local stream tracks:', localStream ? localStream.getTracks().length : 0);
+    // Viewer joined
 
     const configuration = {
         iceServers: webrtcConfig ? webrtcConfig.iceServers : [
@@ -560,12 +534,12 @@ async function handleViewerJoined(viewerId) {
     if (localStream) {
         const tracks = localStream.getTracks();
         tracks.forEach(track => {
-            log('Adding track to peer connection:', track.kind, track.enabled);
+            // Adding track to peer connection
             viewerPc.addTrack(track, localStream);
         });
-        log('Added', tracks.length, 'tracks to peer connection');
+        // Added tracks to peer connection
     } else {
-        log('ERROR: No local stream available for viewer connection');
+        // ERROR: No local stream available
     }
     
     // ICE candidates
@@ -581,7 +555,7 @@ async function handleViewerJoined(viewerId) {
     
     // Connection state
     viewerPc.onconnectionstatechange = () => {
-        log(`Viewer ${viewerId} state:`, viewerPc.connectionState);
+        // Viewer state changed
         
         if (viewerPc.connectionState === 'failed' || viewerPc.connectionState === 'closed') {
             viewers.delete(viewerId);
@@ -593,29 +567,28 @@ async function handleViewerJoined(viewerId) {
     
     // Create offer
     try {
-        log('Creating offer for viewer:', viewerId);
+        // Creating offer for viewer
         const offer = await viewerPc.createOffer();
         await viewerPc.setLocalDescription(offer);
 
-        log('Offer created, sending to server');
+        // Offer created, sending to server
         const offerMessage = {
             type: 'offer',
             offer: offer,
             viewerId: viewerId
         };
 
-        log('Sending offer message:', offerMessage);
+        // Sending offer message
         ws.send(JSON.stringify(offerMessage));
-        log('Offer sent successfully for viewer:', viewerId);
+        // Offer sent successfully
 
     } catch (error) {
-        console.error('[Stream] Offer error:', error);
-        log('Failed to create/send offer for viewer:', viewerId, error.message);
+        // Failed to create/send offer
     }
 }
 
 function handleViewerLeft(viewerId) {
-    log('Viewer left:', viewerId);
+    // Viewer left
     
     const viewerPc = viewers.get(viewerId);
     if (viewerPc) {
@@ -630,7 +603,7 @@ async function handleAnswer(viewerId, answer) {
         try {
             await viewerPc.setRemoteDescription(new RTCSessionDescription(answer));
         } catch (error) {
-            console.error('[Stream] Answer error:', error);
+            // Answer error
         }
     }
 }
@@ -641,13 +614,13 @@ async function handleIceCandidate(viewerId, candidate) {
         try {
             await viewerPc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (error) {
-            console.error('[Stream] ICE error:', error);
+            // ICE error
         }
     }
 }
 
 function stopStream() {
-    log('Stopping stream');
+    // Stopping stream
     isStreaming = false;
 
     // Clear timers
@@ -659,7 +632,7 @@ function stopStream() {
         try {
             pc.close();
         } catch (e) {
-            log('Error closing peer connection:', e);
+            // Error closing peer connection
         }
     });
     viewers.clear();
@@ -679,7 +652,7 @@ function stopStream() {
             }
             ws.close(1000, 'Stream stopped');
         } catch (e) {
-            log('Error closing WebSocket:', e);
+            // Error closing WebSocket
         }
         ws = null;
     }
@@ -696,7 +669,7 @@ function stopStream() {
             try {
                 track.stop();
             } catch (e) {
-                log('Error stopping track:', e);
+                // Error stopping track
             }
         });
         localStream = null;
@@ -760,7 +733,7 @@ function notifyError(error) {
 
 // WebSocket streaming fallback functions
 function enableWebSocketStreaming() {
-    log('🔄 Enabling WebSocket video streaming fallback');
+    // Enabling WebSocket video streaming fallback
     wsStreamingEnabled = true;
 
     if (wsStreamingInterval) {
@@ -772,11 +745,11 @@ function enableWebSocketStreaming() {
         captureAndSendFrame();
     }, 100); // 10 FPS
 
-    log('✅ WebSocket streaming enabled (10 FPS)');
+    // WebSocket streaming enabled (10 FPS)
 }
 
 function disableWebSocketStreaming() {
-    log('⏹️ Disabling WebSocket streaming');
+    // Disabling WebSocket streaming
     wsStreamingEnabled = false;
 
     if (wsStreamingInterval) {
@@ -784,7 +757,7 @@ function disableWebSocketStreaming() {
         wsStreamingInterval = null;
     }
 
-    log('✅ WebSocket streaming disabled');
+    // WebSocket streaming disabled
 }
 
 function captureAndSendFrame() {
@@ -809,7 +782,7 @@ function captureAndSendFrame() {
         }));
 
     } catch (error) {
-        log('Error capturing frame for WebSocket streaming:', error);
+        // Error capturing frame for WebSocket streaming
     }
 }
 
@@ -821,4 +794,4 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
-log('Stream script loaded');
+// Stream script loaded

@@ -32,7 +32,7 @@ CreateThread(function()
             -- Start polling for stream requests
             CreateThread(function()
                 while true do
-                    Wait(2000) -- Poll every 2 seconds
+                    Wait(5000) -- Poll every 5 seconds
                     PollForStreamRequests()
                 end
             end)
@@ -115,34 +115,47 @@ end
 
 -- Existing playerList tracking
 local playerList = {}
+local lastPlayerListHash = ""
+
 CreateThread(function()
     while true do
-        Wait(1000)
-        
-        -- Build current player list
+        Wait(30000) -- Further reduced frequency: every 30 seconds
+
+        -- Build lightweight player list - avoid expensive operations
         local players = {}
-        for _, playerId in ipairs(GetPlayers()) do
+        local playersOnline = GetPlayers()
+
+        for i = 1, #playersOnline do
+            local playerId = playersOnline[i]
             local name = GetPlayerName(playerId)
-            local identifiers = GetPlayerIdentifiers(playerId)
-            local ping = GetPlayerPing(playerId)
-            
-            table.insert(players, {
-                id = playerId,
-                name = name,
-                ping = ping,
-                identifiers = identifiers,
-                streaming = activeStreams[tonumber(playerId)] ~= nil
-            })
+
+            if name then -- Only include if player still exists
+                table.insert(players, {
+                    id = playerId,
+                    name = name,
+                    ping = GetPlayerPing(playerId),
+                    streaming = activeStreams[tonumber(playerId)] ~= nil
+                })
+            end
         end
-        
-        playerList = players
-        
-        -- Send to media server
-        if #players > 0 then
-            CallMediaServer("/players/update", "POST", {
-                players = players,
-                timestamp = os.time()
-            })
+
+        -- Simple hash check using player count and streaming status
+        local streamingStates = {}
+        for _, p in ipairs(players) do
+            table.insert(streamingStates, p.streaming and "1" or "0")
+        end
+        local simpleHash = #players .. ":" .. table.concat(streamingStates, ",")
+        if simpleHash ~= lastPlayerListHash then
+            playerList = players
+            lastPlayerListHash = simpleHash
+
+            -- Send minimal update
+            if #players > 0 then
+                CallMediaServer("/players/update", "POST", {
+                    players = players,
+                    timestamp = os.time()
+                })
+            end
         end
         
         -- Clean up dead streams

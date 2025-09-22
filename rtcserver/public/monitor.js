@@ -271,36 +271,42 @@ function handleStreamAssigned(data) {
         return;
     }
 
-    // WORKAROUND: If this is a new stream (not existing) and going to Panel 0,
-    // simulate the "move to different panel" behavior that works
+    // Panel 0 workaround: simulate panel transfer to ensure WebRTC setup works
     if (!existing && panelId === 0) {
-        console.log('🔄 WORKAROUND: New stream to Panel 0 - simulating panel change');
+        console.log('🔄 Panel 0 workaround: Simulating panel transfer to ensure WebRTC works');
 
         // Set up the stream in Panel 0 normally first
         setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
 
-        // Then simulate a "move" by briefly setting up for Panel 1 and back to Panel 0
+        // After 5 seconds, simulate moving the stream to trigger proper WebRTC setup
         setTimeout(() => {
-            console.log('🔄 WORKAROUND: Triggering refresh for Panel 0');
+            console.log('🔄 Panel 0 workaround: Triggering mock transfer to refresh WebRTC');
 
-            // Clean up current setup
-            stopStreamInPanel(panelId);
+            // Find the active stream
+            const stream = activeStreams.get(playerId);
+            if (stream && stream.panelId === 0) {
+                // Mark as moving to prevent full cleanup
+                stream.isMoving = true;
 
-            // Wait a moment, then re-setup
-            setTimeout(() => {
-                console.log('🔄 WORKAROUND: Re-requesting stream for Panel 0');
+                // Stop current setup but keep it marked as moving
+                stopStreamInPanel(0);
 
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'monitor-request-stream',
-                        apiKey: API_KEY,
-                        playerId: playerId,
-                        panelId: panelId,
-                        playerName: playerName
-                    }));
-                }
-            }, 1000);
-        }, 2000);
+                // Wait a moment, then re-request the same stream for Panel 0
+                setTimeout(() => {
+                    console.log('🔄 Panel 0 workaround: Re-requesting stream for Panel 0');
+
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'monitor-request-stream',
+                            apiKey: API_KEY,
+                            playerId: playerId,
+                            panelId: 0,
+                            playerName: playerName
+                        }));
+                    }
+                }, 1000);
+            }
+        }, 5000); // Wait 5 seconds for initial setup to complete
 
         return; // Exit early for Panel 0 workaround
     }
@@ -852,20 +858,41 @@ function stopPlayerStream(playerId) {
 // Fullscreen specific panel
 function fullscreenPanel(panelId) {
     console.log('🖥️ Fullscreen panel', panelId);
-    
+
     // Convert to number in case it's a string
     panelId = parseInt(panelId);
-    
+
     const panel = panels[panelId];
     if (panel) {
-        if (panel.requestFullscreen) {
-            panel.requestFullscreen();
-        } else if (panel.webkitRequestFullscreen) {
-            panel.webkitRequestFullscreen();
-        } else if (panel.mozRequestFullScreen) {
-            panel.mozRequestFullScreen();
-        } else if (panel.msRequestFullscreen) {
-            panel.msRequestFullscreen();
+        // Check if already in fullscreen mode
+        if (document.fullscreenElement === panel ||
+            document.webkitFullscreenElement === panel ||
+            document.mozFullScreenElement === panel ||
+            document.msFullscreenElement === panel) {
+
+            // Exit fullscreen
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+            } else if (document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+            } else if (document.mozCancelFullScreen) {
+                document.mozCancelFullScreen();
+            } else if (document.msExitFullscreen) {
+                document.msExitFullscreen();
+            }
+            console.log('🖥️ Exiting fullscreen');
+        } else {
+            // Enter fullscreen
+            if (panel.requestFullscreen) {
+                panel.requestFullscreen();
+            } else if (panel.webkitRequestFullscreen) {
+                panel.webkitRequestFullscreen();
+            } else if (panel.mozRequestFullScreen) {
+                panel.mozRequestFullScreen();
+            } else if (panel.msRequestFullscreen) {
+                panel.msRequestFullscreen();
+            }
+            console.log('🖥️ Entering fullscreen');
         }
     } else {
         console.error('❌ Panel not found for fullscreen:', panelId);

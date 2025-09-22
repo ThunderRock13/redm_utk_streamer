@@ -21,14 +21,14 @@ on("__cfx_nui:streamStarted", (data, cb) => {
     cb("ok");
     streamActive = true;
     streamId = data.streamId;
-    console.log(`Stream started: ${streamId}`);
+    // Stream started
 });
 
 on("__cfx_nui:streamError", (data, cb) => {
     cb("ok");
     streamActive = false;
     streamId = null;
-    console.log(`Stream error: ${data.error}`);
+    // Stream error
 });
 
 on("__cfx_nui:streamStats", (data, cb) => {

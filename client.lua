@@ -6,7 +6,6 @@ local streamConfig = nil
 RegisterNetEvent('redm_streamer:startStream')
 AddEventHandler('redm_streamer:startStream', function(config)
     if isStreaming then
-        print("^1[Streamer]^7 Already streaming, stopping first")
         TriggerEvent('redm_streamer:stopStream')
         Wait(2000) -- Give time for cleanup
     end
@@ -15,9 +14,6 @@ AddEventHandler('redm_streamer:startStream', function(config)
     currentStreamId = config.streamId
     streamConfig = config
     
-    print(string.format("^2[Streamer]^7 Starting stream: %s", config.streamId))
-    print(string.format("^2[Streamer]^7 WebSocket URL: %s", config.webSocketUrl or "Not set"))
-    print(string.format("^2[Streamer]^7 Stream Key: %s", config.streamKey or "Not set"))
     
     -- Make sure NUI is ready
     Wait(1000)
@@ -33,7 +29,6 @@ AddEventHandler('redm_streamer:startStream', function(config)
         quality = Config.StreamQuality
     }
     
-    print("^2[Streamer]^7 Sending NUI message: " .. json.encode(nuiMessage))
     SendNUIMessage(nuiMessage)
     
     -- Show notification
@@ -52,11 +47,8 @@ end)
 RegisterNetEvent('redm_streamer:stopStream')
 AddEventHandler('redm_streamer:stopStream', function()
     if not isStreaming then
-        print("^3[Streamer]^7 Not streaming, ignoring stop request")
         return
     end
-    
-    print("^2[Streamer]^7 Stopping stream")
     
     -- Update server with stream stop
     if currentStreamId then
@@ -85,17 +77,11 @@ AddEventHandler('redm_streamer:viewUrl', function(data)
     ShowNotification("~g~Stream Ready~s~")
     ShowNotification("Player: " .. data.playerName)
     ShowNotification("URL: " .. data.hlsUrl)
-    print(string.format("^2[Viewer]^7 Watch at: %s", data.hlsUrl))
 end)
 
 -- Show stats
 RegisterNetEvent('redm_streamer:stats')
 AddEventHandler('redm_streamer:stats', function(stats)
-    print("^2[Stream Stats]^7")
-    print("Viewers: " .. (stats.viewers or 0))
-    print("Bitrate: " .. (stats.bitrate or 0) .. " kbps")
-    print("FPS: " .. (stats.fps or 0))
-    print("Duration: " .. (stats.duration or 0) .. "ms")
 end)
 
 -- Notification
@@ -106,8 +92,6 @@ end)
 
 -- NUI Callbacks
 RegisterNUICallback('streamStarted', function(data, cb)
-    print("^2[Streamer]^7 NUI reports stream started successfully")
-    print("^2[Streamer]^7 Stream Key: " .. (data.streamKey or "unknown"))
     
     -- Notify server that stream is ready
     TriggerServerEvent('redm_streamer:updateStats', {
@@ -121,7 +105,6 @@ RegisterNUICallback('streamStarted', function(data, cb)
 end)
 
 RegisterNUICallback('streamError', function(data, cb)
-    print("^1[Streamer]^7 Stream error: " .. (data.error or "unknown"))
     
     -- Notify server about error
     TriggerServerEvent('redm_streamer:updateStats', {
@@ -154,7 +137,6 @@ RegisterNUICallback('streamStats', function(data, cb)
 end)
 
 RegisterNUICallback('debugLog', function(data, cb)
-    print("^3[NUI Debug]^7 " .. (data.message or ""))
     cb('ok')
 end)
 
@@ -195,20 +177,14 @@ end, false)
 RegisterCommand('streamstatus', function()
     if isStreaming then
         ShowNotification("~g~Streaming: " .. (currentStreamId or "Unknown"))
-        print("^2[Stream Status]^7 Currently streaming:")
-        print("Stream ID: " .. (currentStreamId or "Unknown"))
-        print("Stream Key: " .. (streamConfig and streamConfig.streamKey or "Unknown"))
-        print("WebSocket: " .. (streamConfig and streamConfig.webSocketUrl or "Unknown"))
     else
         ShowNotification("~r~Not streaming~s~")
-        print("^3[Stream Status]^7 Not currently streaming")
     end
 end, false)
 
 -- Auto-cleanup on resource restart
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName and isStreaming then
-        print("^3[Cleanup]^7 Resource stopping, cleaning up stream")
         TriggerServerEvent('redm_streamer:stopStream')
     end
 end)

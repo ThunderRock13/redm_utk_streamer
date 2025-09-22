@@ -20,4 +20,4 @@ Config.StreamQuality = {
 }
 
 -- Debug
-Config.Debug = true
+Config.Debug = false
