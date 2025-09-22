@@ -7,6 +7,13 @@ let players = [];
 let activeStreams = new Map();
 let ws = null;
 let draggedPlayer = null;
+
+// WebRTC Configuration (loaded dynamically for firewall-free streaming)
+let webrtcConfig = null;
+
+// WebSocket streaming fallback
+let wsStreamingEnabled = false;
+let wsStreamingConnections = new Map(); // streamKey -> { ws, canvas, ctx }
 let reconnectAttempts = 0;
 let maxReconnectAttempts = 5;
 let reconnectDelay = 1000; // Start with 1 second
@@ -16,14 +23,52 @@ let panelPeerConnections = new Map(); // Store peer connections by panel ID
 console.log('🚀 Monitor Loading...');
 console.log('🔗 WebSocket URL:', WS_URL);
 
+// Fetch WebRTC configuration from server
+async function loadWebRTCConfig() {
+    try {
+        const response = await fetch(`${SERVER_URL}/api/webrtc/config`);
+        if (response.ok) {
+            webrtcConfig = await response.json();
+            console.log('🔧 WebRTC config loaded:', {
+                turnEnabled: webrtcConfig.turnEnabled,
+                forceRelayOnly: webrtcConfig.forceRelayOnly,
+                iceServersCount: webrtcConfig.iceServers.length
+            });
+            if (webrtcConfig.forceRelayOnly) {
+                console.log('🛡️ Firewall-free mode: Using relay-only WebRTC connections');
+            }
+        } else {
+            console.warn('⚠️ Failed to load WebRTC config, using defaults');
+            webrtcConfig = getDefaultWebRTCConfig();
+        }
+    } catch (error) {
+        console.warn('⚠️ Error loading WebRTC config, using defaults:', error);
+        webrtcConfig = getDefaultWebRTCConfig();
+    }
+}
+
+// Default WebRTC configuration fallback
+function getDefaultWebRTCConfig() {
+    return {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ],
+        iceTransportPolicy: 'all',
+        turnEnabled: false,
+        forceRelayOnly: false
+    };
+}
+
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     console.log('📱 DOM Ready - Initializing UI...');
 
     // Initialize video monitoring system
     window.videoMonitors = new Map();
     window.videoSourceChecks = new Map();
 
+    await loadWebRTCConfig();
     initializePanels(parseInt(localStorage.getItem('panelCount') || '4'));
     connectWebSocket();
     refreshPlayers();
@@ -160,6 +205,16 @@ function connectWebSocket() {
             case 'promoted-to-primary':
                 console.log('🔄 Promoted to primary viewer for stream:', data.streamKey);
                 handlePromotedToPrimary(data.streamKey);
+                break;
+
+            case 'ws-stream-frame':
+                console.log('📺 Received WebSocket video frame');
+                handleWebSocketVideoFrame(data.streamKey, data.frame);
+                break;
+
+            case 'fallback-to-websocket':
+                console.log('⚠️ Falling back to WebSocket streaming for:', data.streamKey);
+                enableWebSocketStreaming(data.streamKey, data.panelId);
                 break;
         }
     };
@@ -453,12 +508,13 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
     panelId = parseInt(panelId);
     
     console.log('🔗 Setting up peer connection for panel', panelId, 'with stream key', streamKey);
-    
+
     const pc = new RTCPeerConnection({
-        iceServers: [
+        iceServers: webrtcConfig ? webrtcConfig.iceServers : [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        ],
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
     });
 
     // Handle incoming stream
@@ -610,6 +666,12 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
             panelId: panelId  // Include panelId so server knows which panel this is for
         }));
         console.log('✅ Viewer registration sent for panel', panelId);
+
+        // Set up WebRTC failure detection for potential WebSocket fallback
+        if (webrtcConfig && webrtcConfig.forceRelayOnly) {
+            console.log('🔍 Setting up WebRTC failure detection for firewall-free mode');
+            detectWebRTCFailure(streamKey, panelId);
+        }
     } else {
         console.error('❌ Cannot register viewer - WebSocket not connected');
     }
@@ -1391,10 +1453,11 @@ function handleShareStreamRequest(sharedViewer, panelId) {
 
     // Create peer connection for sharing
     const pc = new RTCPeerConnection({
-        iceServers: [
+        iceServers: webrtcConfig ? webrtcConfig.iceServers : [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        ],
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
     });
 
     // Add the stream to share
@@ -1437,10 +1500,11 @@ function handleStreamShareOffer(sourceViewer, offer) {
 
     // Create peer connection to receive shared stream
     primaryViewerConnection = new RTCPeerConnection({
-        iceServers: [
+        iceServers: webrtcConfig ? webrtcConfig.iceServers : [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        ],
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
     });
 
     // Handle incoming stream
@@ -1518,6 +1582,85 @@ function handlePromotedToPrimary(streamKey) {
 
     // The stream should continue normally as we're now the primary viewer
     // Future viewers will connect to us for sharing
+}
+
+// WebSocket video streaming fallback functions
+function enableWebSocketStreaming(streamKey, panelId) {
+    console.log(`📺 Enabling WebSocket streaming for ${streamKey} in panel ${panelId}`);
+    wsStreamingEnabled = true;
+
+    // Find the panel and set up canvas for WebSocket streaming
+    const stream = Array.from(activeStreams.values()).find(s => s.streamKey === streamKey);
+    if (!stream) {
+        console.error('❌ Stream not found for WebSocket fallback');
+        return;
+    }
+
+    // Create a canvas element to draw frames
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 640;
+    canvas.height = 360;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.objectFit = 'contain';
+
+    // Replace video element with canvas
+    const videoElement = stream.video;
+    if (videoElement && videoElement.parentNode) {
+        videoElement.parentNode.replaceChild(canvas, videoElement);
+        stream.video = canvas; // Update reference
+    }
+
+    // Store connection info
+    wsStreamingConnections.set(streamKey, {
+        canvas: canvas,
+        ctx: ctx,
+        panelId: panelId
+    });
+
+    // Request WebSocket streaming from server
+    ws.send(JSON.stringify({
+        type: 'request-ws-streaming',
+        streamKey: streamKey,
+        panelId: panelId
+    }));
+
+    console.log(`✅ WebSocket streaming enabled for panel ${panelId}`);
+}
+
+function handleWebSocketVideoFrame(streamKey, frameData) {
+    const connection = wsStreamingConnections.get(streamKey);
+    if (!connection) {
+        console.error('❌ No WebSocket streaming connection found for', streamKey);
+        return;
+    }
+
+    try {
+        // Decode base64 frame and draw to canvas
+        const img = new Image();
+        img.onload = () => {
+            connection.ctx.clearRect(0, 0, connection.canvas.width, connection.canvas.height);
+            connection.ctx.drawImage(img, 0, 0, connection.canvas.width, connection.canvas.height);
+        };
+        img.src = 'data:image/jpeg;base64,' + frameData;
+    } catch (error) {
+        console.error('❌ Error handling WebSocket video frame:', error);
+    }
+}
+
+// Function to detect WebRTC failure and fallback to WebSocket
+function detectWebRTCFailure(streamKey, panelId) {
+    console.log(`🔍 Detecting WebRTC failure for ${streamKey}, considering WebSocket fallback`);
+
+    // Wait 10 seconds for WebRTC to establish
+    setTimeout(() => {
+        const stream = Array.from(activeStreams.values()).find(s => s.streamKey === streamKey);
+        if (stream && stream.video && !stream.video.srcObject) {
+            console.log('⚠️ WebRTC failed to establish, falling back to WebSocket streaming');
+            enableWebSocketStreaming(streamKey, panelId);
+        }
+    }, 10000);
 }
 
 console.log('🔧 Complete monitor loaded. Available debug functions:', Object.keys(window.monitorDebug));

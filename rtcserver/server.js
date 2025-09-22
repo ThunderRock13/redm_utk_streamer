@@ -5,12 +5,30 @@ const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+const turn = require('node-turn');
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
+const TURN_PORT = process.env.TURN_PORT || 3478;
 const API_KEY = process.env.API_KEY || 'redm-media-server-key-2024';
+
+// Built-in TURN server configuration
+const turnServer = new turn({
+    // TURN server listens on port 3478 (standard TURN port)
+    listeningPort: TURN_PORT,
+    listeningIps: ['0.0.0.0'],
+    // Use a simple authentication
+    credentials: {
+        'redm-turn-user': 'redm-turn-pass'
+    },
+    // Enable debugging
+    debugLevel: 'INFO',
+    // Relay configuration
+    relayIps: ['0.0.0.0'],
+    relayPortRange: '49152-65535'
+});
 
 // Middleware
 app.use(cors());
@@ -226,6 +244,39 @@ app.post('/api/monitor/stream-started', authenticateAPI, (req, res) => {
     res.json({ success: true });
 });
 
+// Endpoint to get WebRTC configuration (ICE servers, TURN settings)
+app.get('/api/webrtc/config', (req, res) => {
+    const turnEnabled = process.env.TURN_ENABLED !== 'false'; // Default to true now
+    const forceRelayOnly = process.env.FORCE_RELAY_ONLY === 'true';
+
+    const iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+
+    // Add built-in TURN server
+    if (turnEnabled) {
+        iceServers.push({
+            urls: `turn:localhost:${TURN_PORT}`,
+            username: 'redm-turn-user',
+            credential: 'redm-turn-pass'
+        });
+    }
+
+    const config = {
+        iceServers: iceServers,
+        iceTransportPolicy: forceRelayOnly ? 'relay' : 'all',
+        turnEnabled: turnEnabled,
+        forceRelayOnly: forceRelayOnly,
+        iceCandidatePoolSize: 0, // Prevent ICE candidate gathering to avoid firewall prompts
+        bundlePolicy: 'balanced', // Use balanced bundle policy
+        rtcpMuxPolicy: 'require' // Force RTCP multiplexing to reduce port usage
+    };
+
+    console.log(`[WebRTC Config] Serving configuration: TURN=${turnEnabled}, Relay-Only=${forceRelayOnly}`);
+    res.json(config);
+});
+
 // Endpoint for RedM server to notify stream ended
 app.post('/api/monitor/stream-ended', authenticateAPI, (req, res) => {
     const { playerId, streamId, streamKey, reason } = req.body;
@@ -403,6 +454,14 @@ function handleWebSocketMessage(clientId, ws, data) {
 
         case 'stream-share-ice':
             handleStreamShareIce(clientId, ws, data);
+            break;
+
+        case 'request-ws-streaming':
+            handleRequestWSStreaming(clientId, ws, data);
+            break;
+
+        case 'ws-stream-frame':
+            handleWSStreamFrame(clientId, ws, data);
             break;
 
         default:
@@ -793,6 +852,19 @@ function handleViewerRegistration(clientId, ws, data) {
             streamKey: streamKey
         };
         streamSharing.set(streamKey, sharing);
+    } else {
+        // Check if the current primary viewer is still connected
+        const primaryConnection = connections.get(sharing.primaryViewer);
+        if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
+            // Primary viewer is disconnected - make this viewer the new primary
+            console.log(`[Sharing] Primary viewer ${sharing.primaryViewer} disconnected, promoting ${clientId} to primary`);
+            sharing.primaryViewer = clientId;
+            sharing.sharedViewers.clear(); // Clear any shared viewers
+        }
+    }
+
+    // Determine if this viewer should be primary or shared
+    if (sharing.primaryViewer === clientId) {
 
         console.log(`[Sharing] Client ${clientId} is now primary viewer for stream ${streamKey}`);
 
@@ -841,7 +913,31 @@ function handleViewerRegistration(clientId, ws, data) {
         }, 2000);
         }
     } else {
-        // This is a secondary viewer - add them to shared viewers
+        // This is a secondary viewer - but check if primary is still active
+        const primaryConnection = connections.get(sharing.primaryViewer);
+        if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
+            // Primary is gone, promote this viewer to primary instead
+            console.log(`[Sharing] Primary viewer ${sharing.primaryViewer} inactive during registration, promoting ${clientId} to primary`);
+            sharing.primaryViewer = clientId;
+            sharing.sharedViewers.clear();
+
+            ws.send(JSON.stringify({
+                type: 'registered',
+                role: 'viewer',
+                streamKey,
+                viewerType: 'primary'
+            }));
+
+            // Notify streamer if available
+            if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
+                stream.streamerWs.send(JSON.stringify({
+                    type: 'viewer-joined',
+                    viewerId: clientId,
+                    panelId: panelId
+                }));
+            }
+        } else {
+            // This is a secondary viewer - add them to shared viewers
         sharing.sharedViewers.add(clientId);
         console.log(`[Sharing] Client ${clientId} added as shared viewer for stream ${streamKey} (Primary: ${sharing.primaryViewer})`);
 
@@ -862,6 +958,7 @@ function handleViewerRegistration(clientId, ws, data) {
                 panelId: panelId
             }));
             console.log(`[Sharing] Notified primary viewer ${sharing.primaryViewer} about new shared viewer ${clientId}`);
+        }
         }
     }
 
@@ -1322,6 +1419,65 @@ function cleanupViewerSharing(clientId) {
     }
 }
 
+// WebSocket streaming fallback handlers
+function handleRequestWSStreaming(clientId, ws, data) {
+    const { streamKey, panelId } = data;
+    console.log(`[WS-Streaming] Monitor requesting WebSocket streaming for ${streamKey} in panel ${panelId}`);
+
+    // Find the stream
+    let stream = null;
+    for (const [id, s] of activeStreams) {
+        if (s.streamKey === streamKey) {
+            stream = s;
+            break;
+        }
+    }
+
+    if (!stream) {
+        console.log(`[WS-Streaming] Stream not found: ${streamKey}`);
+        return;
+    }
+
+    // Notify the streamer to start WebSocket streaming
+    if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
+        stream.streamerWs.send(JSON.stringify({
+            type: 'request-ws-streaming',
+            streamKey: streamKey
+        }));
+        console.log(`[WS-Streaming] Requested WebSocket streaming from streamer for ${streamKey}`);
+    } else {
+        console.log(`[WS-Streaming] Streamer not available for WebSocket streaming request`);
+    }
+}
+
+function handleWSStreamFrame(clientId, ws, data) {
+    const { streamKey, frame } = data;
+
+    // Find the stream
+    let stream = null;
+    for (const [id, s] of activeStreams) {
+        if (s.streamKey === streamKey) {
+            stream = s;
+            break;
+        }
+    }
+
+    if (!stream) {
+        return;
+    }
+
+    // Relay frame to all viewers of this stream
+    stream.viewerWsList.forEach(viewerWs => {
+        if (viewerWs && viewerWs.readyState === WebSocket.OPEN) {
+            viewerWs.send(JSON.stringify({
+                type: 'ws-stream-frame',
+                streamKey: streamKey,
+                frame: frame
+            }));
+        }
+    });
+}
+
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`=====================================`);
@@ -1332,6 +1488,19 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`[Media Server] Player: http://localhost:${PORT}/player/`);
     console.log(`[Media Server] Monitor: http://localhost:${PORT}/monitor`);
     console.log(`[Media Server] API Key: ${API_KEY}`);
+
+    // Start built-in TURN server
+    try {
+        turnServer.start();
+        console.log(`[TURN Server] Built-in TURN server running on port ${TURN_PORT}`);
+        console.log(`[TURN Server] TURN URL: turn:localhost:${TURN_PORT}`);
+        console.log(`[TURN Server] Username: redm-turn-user`);
+        console.log(`[TURN Server] 🛡️ Firewall-free WebRTC enabled!`);
+    } catch (error) {
+        console.error(`[TURN Server] Failed to start TURN server:`, error);
+        console.log(`[TURN Server] Continuing without TURN relay...`);
+    }
+
     console.log(`=====================================`);
 });
 

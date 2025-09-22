@@ -8,6 +8,13 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let isStreaming = false;
 let renderStarted = false;
+
+// WebRTC Configuration (for firewall-free streaming)
+let webrtcConfig = null;
+
+// WebSocket streaming fallback
+let wsStreamingEnabled = false;
+let wsStreamingInterval = null;
 console.log('[Stream.js] Script loaded at', new Date().toISOString());
 
 // Debug mode
@@ -25,6 +32,43 @@ function log(...args) {
         console.log('[Stream]', ...args);
         updateDebug('status', args.join(' '));
     }
+}
+
+// Load WebRTC configuration from server for firewall-free streaming
+async function loadWebRTCConfig() {
+    try {
+        const response = await fetch('http://localhost:3000/api/webrtc/config');
+        if (response.ok) {
+            webrtcConfig = await response.json();
+            log('WebRTC config loaded:', {
+                turnEnabled: webrtcConfig.turnEnabled,
+                forceRelayOnly: webrtcConfig.forceRelayOnly,
+                iceServersCount: webrtcConfig.iceServers.length
+            });
+            if (webrtcConfig.forceRelayOnly) {
+                log('🛡️ Firewall-free mode: Using relay-only WebRTC connections');
+            }
+        } else {
+            log('Failed to load WebRTC config, using defaults');
+            webrtcConfig = getDefaultWebRTCConfig();
+        }
+    } catch (error) {
+        log('Error loading WebRTC config, using defaults:', error);
+        webrtcConfig = getDefaultWebRTCConfig();
+    }
+}
+
+// Default WebRTC configuration fallback
+function getDefaultWebRTCConfig() {
+    return {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ],
+        iceTransportPolicy: 'all',
+        turnEnabled: false,
+        forceRelayOnly: false
+    };
 }
 
 function updateDebug(field, value) {
@@ -225,17 +269,22 @@ class CfxGameViewRenderer {
 
 async function startStream(config) {
     log('Starting stream:', config.streamId);
-    
+
     if (isStreaming) {
         log('Already streaming, stopping first');
         stopStream();
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    
+
+    // Load WebRTC configuration for firewall-free streaming
+    if (!webrtcConfig) {
+        await loadWebRTCConfig();
+    }
+
     streamConfig = config;
     isStreaming = true;
     updateDebug('streamId', config.streamId);
-    
+
     try {
         // Get canvas
         const canvas = document.getElementById('stream-canvas');
@@ -273,7 +322,7 @@ async function startStream(config) {
             createTestPattern(canvas);
             await new Promise(resolve => setTimeout(resolve, 500));
             localStream = canvas.captureStream(30);
-            
+
             const newTracks = localStream.getVideoTracks();
             if (newTracks.length === 0) {
                 throw new Error('No video track available');
@@ -398,6 +447,16 @@ function connectToSignalingServer(config) {
                     stopStream();
                 }
                 break;
+
+            case 'request-ws-streaming':
+                log('WebSocket streaming requested for fallback');
+                enableWebSocketStreaming();
+                break;
+
+            case 'stop-ws-streaming':
+                log('Stopping WebSocket streaming');
+                disableWebSocketStreaming();
+                break;
         }
     };
     
@@ -488,10 +547,11 @@ async function handleViewerJoined(viewerId) {
     log('Local stream tracks:', localStream ? localStream.getTracks().length : 0);
 
     const configuration = {
-        iceServers: [
+        iceServers: webrtcConfig ? webrtcConfig.iceServers : [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
-        ]
+        ],
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
     };
 
     const viewerPc = new RTCPeerConnection(configuration);
@@ -698,9 +758,65 @@ function notifyError(error) {
     });
 }
 
+// WebSocket streaming fallback functions
+function enableWebSocketStreaming() {
+    log('🔄 Enabling WebSocket video streaming fallback');
+    wsStreamingEnabled = true;
+
+    if (wsStreamingInterval) {
+        clearInterval(wsStreamingInterval);
+    }
+
+    // Start capturing and sending frames via WebSocket
+    wsStreamingInterval = setInterval(() => {
+        captureAndSendFrame();
+    }, 100); // 10 FPS
+
+    log('✅ WebSocket streaming enabled (10 FPS)');
+}
+
+function disableWebSocketStreaming() {
+    log('⏹️ Disabling WebSocket streaming');
+    wsStreamingEnabled = false;
+
+    if (wsStreamingInterval) {
+        clearInterval(wsStreamingInterval);
+        wsStreamingInterval = null;
+    }
+
+    log('✅ WebSocket streaming disabled');
+}
+
+function captureAndSendFrame() {
+    if (!wsStreamingEnabled || !ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+    }
+
+    try {
+        const canvas = document.getElementById('stream-canvas');
+        if (!canvas) {
+            return;
+        }
+
+        // Convert canvas to base64 JPEG
+        const frameData = canvas.toDataURL('image/jpeg', 0.7).split(',')[1]; // Remove data:image/jpeg;base64, prefix
+
+        // Send frame via WebSocket
+        ws.send(JSON.stringify({
+            type: 'ws-stream-frame',
+            streamKey: streamConfig?.streamKey,
+            frame: frameData
+        }));
+
+    } catch (error) {
+        log('Error capturing frame for WebSocket streaming:', error);
+    }
+}
+
 // Auto cleanup on page unload
 window.addEventListener('beforeunload', () => {
     if (isStreaming) {
+        disableWebSocketStreaming();
         stopStream();
     }
 });
