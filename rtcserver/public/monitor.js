@@ -19,10 +19,11 @@ console.log('🔗 WebSocket URL:', WS_URL);
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     console.log('📱 DOM Ready - Initializing UI...');
-    
+
     // Initialize video monitoring system
     window.videoMonitors = new Map();
-    
+    window.videoSourceChecks = new Map();
+
     initializePanels(parseInt(localStorage.getItem('panelCount') || '4'));
     connectWebSocket();
     refreshPlayers();
@@ -39,67 +40,54 @@ function connectWebSocket() {
         console.log('✅ Already connected, skipping reconnection');
         return;
     }
-    checkAllVideos: () => {
-        console.log('📊 Checking all video states:');
-        activeStreams.forEach((stream, playerId) => {
-            const state = window.monitorDebug.getVideoState(stream.panelId);
-            console.log(`Panel ${stream.panelId} (Player ${playerId}):`, state);
-        });
-    }
+    console.log('🔌 Connecting to WebSocket...');
 
-    console.log('🔌 === WebSocket Connection Attempt ===');
-    console.log('🔗 URL:', WS_URL);
-    console.log('⏰ Time:', new Date().toISOString());
-    
     // Close existing connection
     if (ws) {
-        console.log('🔄 Closing existing WebSocket...');
         ws.onclose = null; // Prevent triggering reconnect
         ws.close();
     }
 
-    console.log('🔨 Creating new WebSocket instance...');
     ws = new WebSocket(WS_URL);
-    
-    console.log('📊 WebSocket created, state:', ws.readyState);
-    console.log('🔗 WebSocket URL:', ws.url);
 
     ws.onopen = () => {
-        console.log('🎉 === WebSocket CONNECTED! ===');
-        console.log('📊 Event:', event);
-        console.log('📊 ReadyState:', ws.readyState);
-        
+        console.log('✅ WebSocket connected');
+
         isConnected = true;
         reconnectAttempts = 0; // Reset attempts on successful connection
         reconnectDelay = 1000; // Reset delay
-        updateConnectionStatus('Connected');
+        updateConnectionStatus('Connecting...');
 
         // Register as monitor with API key
-        const registration = {
+        ws.send(JSON.stringify({
             type: 'register-monitor',
             apiKey: API_KEY
-        };
-        console.log('📤 Sending registration:', registration);
-        ws.send(JSON.stringify(registration));
+        }));
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        console.log('📨 Message received:', data.type, data);
 
         switch (data.type) {
             case 'registered':
                 if (data.role === 'monitor') {
-                    console.log('✅ Monitor registration successful!');
+                    console.log('✅ Monitor registered');
                     updateConnectionStatus('Registered');
                 } else if (data.role === 'viewer') {
-                    console.log('✅ Viewer registration successful for stream:', data.streamKey);
-                    // Viewer registration successful - peer connection already set up
+                    if (data.viewerType === 'primary') {
+                        console.log('✅ Viewer registered as PRIMARY for stream:', data.streamKey);
+                        // Primary viewer gets normal WebRTC connection
+                    } else if (data.viewerType === 'shared') {
+                        console.log('✅ Viewer registered as SHARED for stream:', data.streamKey, 'Primary viewer:', data.primaryViewer);
+                        // Shared viewer will receive stream from primary viewer
+                        handleSharedViewerSetup(data.streamKey, data.primaryViewer);
+                    } else {
+                        console.log('✅ Viewer registered for stream:', data.streamKey);
+                    }
                 }
                 break;
 
             case 'player-update':
-                console.log('👥 Players received:', data.players?.length || 0);
                 players = data.players || [];
                 updatePlayerList();
                 break;
@@ -146,39 +134,58 @@ function connectWebSocket() {
                 break;
 
             case 'ping':
-                // Don't log pings, just respond
                 ws.send(JSON.stringify({ type: 'pong' }));
+                break;
+
+            case 'share-stream-request':
+                console.log('🤝 Share stream request for shared viewer:', data.sharedViewer);
+                handleShareStreamRequest(data.sharedViewer, data.panelId);
+                break;
+
+            case 'stream-share-offer':
+                console.log('🤝 Received stream share offer from:', data.sourceViewer);
+                handleStreamShareOffer(data.sourceViewer, data.offer);
+                break;
+
+            case 'stream-share-answer':
+                console.log('🤝 Received stream share answer from:', data.sourceViewer);
+                handleStreamShareAnswer(data.sourceViewer, data.answer);
+                break;
+
+            case 'stream-share-ice':
+                console.log('🤝 Received stream share ICE from:', data.sourceViewer);
+                handleStreamShareIce(data.sourceViewer, data.candidate);
+                break;
+
+            case 'promoted-to-primary':
+                console.log('🔄 Promoted to primary viewer for stream:', data.streamKey);
+                handlePromotedToPrimary(data.streamKey);
                 break;
         }
     };
 
     ws.onerror = (error) => {
-        console.log('💥 === WebSocket ERROR ===');
-        console.log('❌ Error:', error);
-        console.log('📊 ReadyState:', ws.readyState);
+        console.log('❌ WebSocket error');
         updateConnectionStatus('Connection Error');
     };
 
     ws.onclose = (event) => {
-        console.log('🔌 === WebSocket CLOSED ===');
-        console.log('📊 Code:', event.code);
-        console.log('📊 Reason:', event.reason);
-        console.log('📊 Clean:', event.wasClean);
-        
+        console.log('🔌 WebSocket closed (code:', event.code + ')');
+
         isConnected = false;
         updateConnectionStatus('Disconnected');
 
         // Only attempt reconnection if not manually closed
         if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
             reconnectAttempts++;
-            console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts} in ${reconnectDelay}ms...`);
-            
+            console.log(`🔄 Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...`);
+
             setTimeout(() => {
-                if (!isConnected) { // Double check we're still disconnected
+                if (!isConnected) {
                     connectWebSocket();
                 }
             }, reconnectDelay);
-            
+
             // Exponential backoff, max 30 seconds
             reconnectDelay = Math.min(reconnectDelay * 2, 30000);
         } else if (reconnectAttempts >= maxReconnectAttempts) {
@@ -190,25 +197,65 @@ function connectWebSocket() {
 
 // Handle stream assignment from server
 function handleStreamAssigned(data) {
-    let { panelId, streamId, streamKey, playerName, playerId } = data;
-    
+    let { panelId, streamId, streamKey, playerName, playerId, existing } = data;
+
     // Convert to numbers to avoid type issues
     panelId = parseInt(panelId);
     playerId = parseInt(playerId);
-    
-    console.log('🎬 Setting up stream UI for panel', panelId, 'player', playerId);
-    
+
+    console.log('🎬 Setting up stream UI for panel', panelId, 'player', playerId, existing ? '(existing stream)' : '(new stream)');
+
     if (panelId < 0 || panelId >= panels.length) {
         console.error('❌ Invalid panel ID in stream assignment:', panelId);
         return;
     }
-    
+
     const panel = panels[panelId];
     if (!panel) {
         console.error('❌ Panel not found in stream assignment:', panelId);
         return;
     }
 
+    // WORKAROUND: If this is a new stream (not existing) and going to Panel 0,
+    // simulate the "move to different panel" behavior that works
+    if (!existing && panelId === 0) {
+        console.log('🔄 WORKAROUND: New stream to Panel 0 - simulating panel change');
+
+        // Set up the stream in Panel 0 normally first
+        setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
+
+        // Then simulate a "move" by briefly setting up for Panel 1 and back to Panel 0
+        setTimeout(() => {
+            console.log('🔄 WORKAROUND: Triggering refresh for Panel 0');
+
+            // Clean up current setup
+            stopStreamInPanel(panelId);
+
+            // Wait a moment, then re-setup
+            setTimeout(() => {
+                console.log('🔄 WORKAROUND: Re-requesting stream for Panel 0');
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'monitor-request-stream',
+                        apiKey: API_KEY,
+                        playerId: playerId,
+                        panelId: panelId,
+                        playerName: playerName
+                    }));
+                }
+            }, 1000);
+        }, 2000);
+
+        return; // Exit early for Panel 0 workaround
+    }
+
+    // Normal setup for other panels or existing streams
+    setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
+}
+
+// Extracted stream setup logic
+function setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel) {
     // Create video element
     const video = document.createElement('video');
     video.className = 'stream-video';
@@ -216,7 +263,7 @@ function handleStreamAssigned(data) {
     video.controls = false;
     video.muted = true;
     video.playsInline = true; // Important for mobile/some browsers
-    
+
     // Add video event listeners for debugging
     video.addEventListener('loadstart', () => console.log(`📺 Panel ${panelId}: Video load started`));
     video.addEventListener('loadeddata', () => console.log(`📺 Panel ${panelId}: Video data loaded`));
@@ -225,13 +272,12 @@ function handleStreamAssigned(data) {
     video.addEventListener('pause', () => console.log(`📺 Panel ${panelId}: Video paused`));
     video.addEventListener('ended', () => console.log(`📺 Panel ${panelId}: Video ended`));
     video.addEventListener('error', (e) => console.error(`📺 Panel ${panelId}: Video error`, e));
-    
-    // Video update detection
+
+    // Video update detection (silent)
     let lastUpdateTime = 0;
     video.addEventListener('timeupdate', () => {
         const now = Date.now();
-        if (now - lastUpdateTime > 5000) { // Log every 5 seconds
-            console.log(`📺 Panel ${panelId}: Video updating (time: ${video.currentTime})`);
+        if (now - lastUpdateTime > 5000) {
             lastUpdateTime = now;
         }
     });
@@ -257,9 +303,13 @@ function handleStreamAssigned(data) {
     panel.appendChild(overlay);
     panel.classList.add('active');
 
-    // Set up WebRTC connection for this panel
+    // Set up WebRTC connection for this panel AFTER UI is ready
     console.log('🔗 Setting up peer connection for panel', panelId);
-    setupPeerConnectionForPanel(panelId, video, streamKey);
+
+    // Wait a bit for UI to stabilize before setting up WebRTC
+    setTimeout(() => {
+        setupPeerConnectionForPanel(panelId, video, streamKey);
+    }, 500);
 
     // Store active stream with video monitoring
     activeStreams.set(playerId, {
@@ -272,11 +322,88 @@ function handleStreamAssigned(data) {
 
     // Update player list
     updatePlayerStreaming(playerId, true);
-    
+
     // Start video health monitoring for this panel
     startVideoHealthMonitoring(panelId, playerId);
-    
+
     console.log('✅ Stream UI setup complete:', playerName, 'in panel', panelId);
+}
+
+// Monitor for video source when WebRTC connects but no track arrives
+function startVideoSourceMonitoring(panelId, streamKey) {
+    console.log(`🔍 Starting video source monitoring for panel ${panelId}`);
+
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    const sourceCheckInterval = setInterval(() => {
+        attempts++;
+        console.log(`🔍 Panel ${panelId}: Video source check attempt ${attempts}/${maxAttempts}`);
+
+        const connectionInfo = panelPeerConnections.get(panelId);
+        if (!connectionInfo || !connectionInfo.videoElement) {
+            console.log(`❌ Panel ${panelId}: Connection info lost, stopping monitoring`);
+            clearInterval(sourceCheckInterval);
+            return;
+        }
+
+        const video = connectionInfo.videoElement;
+
+        if (video.srcObject && video.videoWidth > 0 && video.videoHeight > 0) {
+            console.log(`✅ Panel ${panelId}: Video source now available!`);
+            clearInterval(sourceCheckInterval);
+            window.videoSourceChecks.delete(panelId);
+            return;
+        }
+
+        if (attempts >= maxAttempts) {
+            console.log(`⚠️ Panel ${panelId}: No video source after ${maxAttempts} attempts, requesting new connection`);
+            clearInterval(sourceCheckInterval);
+            window.videoSourceChecks.delete(panelId);
+
+            // Request a fresh stream connection
+            retryStreamConnection(panelId, streamKey);
+        }
+    }, 5000); // Check every 5 seconds
+
+    window.videoSourceChecks.set(panelId, sourceCheckInterval);
+}
+
+// Retry stream connection when video source is missing
+function retryStreamConnection(panelId, streamKey) {
+    console.log(`🔄 Retrying stream connection for panel ${panelId}`);
+
+    // Find the active stream for this panel
+    let playerId = null;
+    activeStreams.forEach((stream, pid) => {
+        if (parseInt(stream.panelId) === panelId) {
+            playerId = pid;
+        }
+    });
+
+    if (playerId) {
+        console.log(`🔄 Found player ${playerId} for panel ${panelId}, requesting fresh connection`);
+
+        // Clean up current connection
+        stopStreamInPanel(panelId);
+
+        // Wait a moment then request new stream
+        setTimeout(() => {
+            const player = players.find(p => parseInt(p.id) === playerId);
+            const playerName = player ? player.name : `Player ${playerId}`;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'monitor-request-stream',
+                    apiKey: API_KEY,
+                    playerId: playerId,
+                    panelId: panelId,
+                    playerName: playerName
+                }));
+                console.log(`🔄 Requested fresh stream for player ${playerId} in panel ${panelId}`);
+            }
+        }, 2000);
+    }
 }
 
 // Monitor video health and restart if needed
@@ -337,39 +464,102 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
     // Handle incoming stream
     pc.ontrack = (event) => {
         console.log('🎥 Video track received for panel', panelId);
-        
-        const stream = event.streams[0];
-        videoElement.srcObject = stream;
-        
-        // Ensure video plays and updates continuously
-        videoElement.play().then(() => {
-            console.log('✅ Video playback started for panel', panelId);
-        }).catch((error) => {
-            console.log('⚠️ Video autoplay failed, trying to play manually:', error);
-            // For some browsers, we might need to unmute first
-            videoElement.muted = true;
-            videoElement.play();
+        console.log('📊 Track details:', {
+            kind: event.track.kind,
+            enabled: event.track.enabled,
+            readyState: event.track.readyState,
+            streamCount: event.streams.length
         });
-        
-        // Force video to be visible and update
+
+        const stream = event.streams[0];
+        const tracks = stream.getTracks();
+        console.log('📊 Stream tracks:', tracks.map(t => ({ kind: t.kind, enabled: t.enabled, readyState: t.readyState })));
+
+        videoElement.srcObject = stream;
+
+        // Clear any existing "no video source" monitoring for this panel
+        if (window.videoSourceChecks && window.videoSourceChecks.has(panelId)) {
+            clearInterval(window.videoSourceChecks.get(panelId));
+            window.videoSourceChecks.delete(panelId);
+            console.log(`🧹 Cleared video source check for panel ${panelId} - track received`);
+        }
+
+        // Immediate video configuration
         videoElement.style.display = 'block';
         videoElement.style.width = '100%';
         videoElement.style.height = '100%';
         videoElement.style.objectFit = 'contain';
-        
+        videoElement.style.backgroundColor = '#000';
+        videoElement.muted = true; // Ensure muted for autoplay
+        videoElement.autoplay = true;
+        videoElement.playsInline = true;
+
+        // Add comprehensive event listeners for debugging
+        videoElement.addEventListener('loadstart', () => console.log(`📺 Panel ${panelId}: Load start`));
+        videoElement.addEventListener('loadedmetadata', () => {
+            console.log(`📺 Panel ${panelId}: Metadata loaded - ${videoElement.videoWidth}x${videoElement.videoHeight}`);
+        });
+        videoElement.addEventListener('loadeddata', () => {
+            console.log(`📺 Panel ${panelId}: Data loaded, ready state: ${videoElement.readyState}`);
+        });
+        videoElement.addEventListener('canplay', () => {
+            console.log(`📺 Panel ${panelId}: Can play`);
+        });
+        videoElement.addEventListener('playing', () => {
+            console.log(`📺 Panel ${panelId}: Playing started`);
+        });
+        videoElement.addEventListener('waiting', () => {
+            console.log(`📺 Panel ${panelId}: Waiting for data`);
+        });
+        videoElement.addEventListener('stalled', () => {
+            console.log(`📺 Panel ${panelId}: Stalled`);
+        });
+
+        // Force immediate video playback with multiple attempts
+        const attemptPlay = async (attempt = 1) => {
+            try {
+                console.log(`📺 Panel ${panelId}: Play attempt ${attempt} - ready state: ${videoElement.readyState}`);
+                await videoElement.play();
+                console.log(`✅ Video playback started for panel ${panelId} (attempt ${attempt})`);
+                return true;
+            } catch (error) {
+                console.log(`⚠️ Video play attempt ${attempt} failed for panel ${panelId}:`, error.message);
+                if (attempt < 5) {
+                    // Wait and retry with increasing delays
+                    setTimeout(() => attemptPlay(attempt + 1), 500 * attempt);
+                } else {
+                    console.log(`❌ All play attempts failed for panel ${panelId}`);
+                }
+                return false;
+            }
+        };
+
+        // Start playing immediately
+        setTimeout(() => attemptPlay(), 100);
+
+        // Also try playing when video is loaded
+        videoElement.addEventListener('loadeddata', () => {
+            console.log(`📺 Panel ${panelId}: Video data loaded, attempting play`);
+            setTimeout(() => attemptPlay(), 200);
+        });
+
+        videoElement.addEventListener('canplay', () => {
+            console.log(`📺 Panel ${panelId}: Video can play, attempting play`);
+            setTimeout(() => attemptPlay(), 100);
+        });
+
         console.log('✅ Video stream connected and configured for panel', panelId);
-        
-        // Debug: Log video properties
-        setTimeout(() => {
-            console.log(`📊 Panel ${panelId} video state:`, {
-                paused: videoElement.paused,
-                muted: videoElement.muted,
-                readyState: videoElement.readyState,
-                videoWidth: videoElement.videoWidth,
-                videoHeight: videoElement.videoHeight,
-                srcObject: !!videoElement.srcObject
-            });
-        }, 1000);
+
+        // Monitor for srcObject loss (reduced logging)
+        const debugInterval = setInterval(() => {
+            if (!videoElement.srcObject) {
+                console.log(`❌ Panel ${panelId}: srcObject lost`);
+                clearInterval(debugInterval);
+            }
+        }, 5000);
+
+        // Clear debug after 30 seconds
+        setTimeout(() => clearInterval(debugInterval), 30000);
     };
 
     pc.onicecandidate = (event) => {
@@ -386,6 +576,15 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
         console.log(`📡 Panel ${panelId} connection state:`, pc.connectionState);
         if (pc.connectionState === 'connected') {
             console.log(`✅ Panel ${panelId} WebRTC connection established!`);
+
+            // Start monitoring for video tracks after connection establishes (extended delay)
+            setTimeout(() => {
+                if (!videoElement.srcObject) {
+                    console.log(`⚠️ Panel ${panelId}: WebRTC connected but no video source after 10 seconds`);
+                    startVideoSourceMonitoring(panelId, streamKey);
+                }
+            }, 10000); // Increased from 3 to 10 seconds
+
         } else if (pc.connectionState === 'failed') {
             console.log(`❌ Panel ${panelId} WebRTC connection failed`);
         }
@@ -402,57 +601,107 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
     
     console.log(`💾 Stored peer connection for panel ${panelId} and stream ${streamKey}`);
 
-    // Register as viewer for this stream (AFTER peer connection is set up)
-    console.log('📝 Registering as viewer for panel', panelId);
+    // Register as viewer for this stream IMMEDIATELY (viewer registration should happen first)
+    console.log('📝 Registering as viewer for panel', panelId, 'with stream key', streamKey);
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
             type: 'register-viewer',
             streamKey: streamKey,
             panelId: panelId  // Include panelId so server knows which panel this is for
         }));
+        console.log('✅ Viewer registration sent for panel', panelId);
+    } else {
+        console.error('❌ Cannot register viewer - WebSocket not connected');
     }
 }
 
 // Handle WebRTC offer from streamer
 async function handleWebRTCOffer(data) {
-    const { offer, streamerId } = data;
-    
-    console.log('📡 Processing WebRTC offer from streamer', streamerId);
-    
-    // Find the peer connection that's waiting for this offer
-    // We need to match by the connection that was recently registered
+    const { offer, streamerId, panelId } = data;
+
+    console.log('📡 Processing WebRTC offer from streamer', streamerId, 'for panel', panelId);
+
+    // Find the peer connection for this specific panel
     let connectionInfo = null;
-    
-    // Find the most recently created connection (should be the one waiting for offer)
-    panelPeerConnections.forEach((info, key) => {
-        if (info.pc && info.pc.connectionState === 'new') {
-            connectionInfo = info;
-            console.log('📡 Found waiting peer connection for panel', info.panelId);
-        }
-    });
-    
+
+    // First try to find by panelId (most accurate)
+    if (typeof panelId === 'number') {
+        connectionInfo = panelPeerConnections.get(panelId);
+        console.log('📡 Found peer connection by panelId', panelId);
+    }
+
+    // Fallback: find the most recently created connection that's ready
     if (!connectionInfo) {
-        console.error('❌ No peer connection found for WebRTC offer');
+        console.log('📡 Searching for available peer connection...');
+        panelPeerConnections.forEach((info, key) => {
+            if (info.pc && (info.pc.connectionState === 'new' || info.pc.connectionState === 'stable')) {
+                connectionInfo = info;
+                console.log('📡 Found available peer connection for panel', info.panelId);
+            }
+        });
+    }
+
+    // If still no connection, wait a bit and try again (race condition fix)
+    if (!connectionInfo) {
+        console.log('⏳ No peer connection ready yet, waiting 1 second...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Try again after waiting
+        if (typeof panelId === 'number') {
+            connectionInfo = panelPeerConnections.get(panelId);
+        }
+
+        if (!connectionInfo) {
+            panelPeerConnections.forEach((info, key) => {
+                if (info.pc && (info.pc.connectionState === 'new' || info.pc.connectionState === 'stable')) {
+                    connectionInfo = info;
+                }
+            });
+        }
+    }
+
+    if (!connectionInfo) {
+        console.error('❌ No peer connection found for WebRTC offer after retry');
         console.log('📊 Available connections:', Array.from(panelPeerConnections.keys()));
         return;
     }
-    
-    const { pc, panelId } = connectionInfo;
-    
+
+    const { pc, panelId: actualPanelId, videoElement } = connectionInfo;
+
     try {
-        console.log('📡 Setting remote description for panel', panelId);
+        console.log('📡 Setting remote description for panel', actualPanelId);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        
-        console.log('📡 Creating answer for panel', panelId);
+
+        console.log('📡 Creating answer for panel', actualPanelId);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        
-        console.log('📡 Sending answer for panel', panelId);
+
+        console.log('📡 Sending answer for panel', actualPanelId);
         ws.send(JSON.stringify({
             type: 'answer',
             answer: answer
         }));
-        
+
+        // Force video to start playing immediately after connection with multiple attempts
+        const forcePlay = async (attempt = 1) => {
+            if (videoElement && attempt <= 3) {
+                try {
+                    console.log(`📺 Attempt ${attempt}: Force starting video playback for panel ${actualPanelId}`);
+                    await videoElement.play();
+                    console.log(`✅ Video playing successfully on attempt ${attempt}`);
+                } catch (e) {
+                    console.log(`⚠️ Play attempt ${attempt} failed:`, e.message);
+                    if (attempt < 3) {
+                        setTimeout(() => forcePlay(attempt + 1), 1000);
+                    } else {
+                        console.log('❌ All play attempts failed - user interaction may be required');
+                    }
+                }
+            }
+        };
+
+        setTimeout(() => forcePlay(), 500);
+
     } catch (error) {
         console.error('❌ Error handling WebRTC offer:', error);
     }
@@ -501,21 +750,40 @@ async function handleWebRTCIceCandidate(data) {
 // Stop specific player's stream (called by X button)
 function stopPlayerStream(playerId) {
     console.log('🛑 Stopping stream for player', playerId);
-    
+
     const stream = activeStreams.get(playerId);
     if (stream) {
-        stopStreamInPanel(stream.panelId);
-        
-        // Also send stop command to server to stop the actual streaming
+        console.log(`🛑 Found stream for player ${playerId}, sending stop commands`);
+
+        // First send stop command to server to stop the actual RedM streaming
         if (ws && ws.readyState === WebSocket.OPEN) {
+            console.log(`📤 Sending stream stop command to server for player ${playerId}`);
+
             ws.send(JSON.stringify({
                 type: 'monitor-stop-stream',
                 apiKey: API_KEY,
                 playerId: playerId,
                 panelId: stream.panelId,
-                streamKey: stream.streamKey
+                streamKey: stream.streamKey,
+                reason: 'manual_stop'
             }));
+
+            // Also send a direct cleanup command to ensure RedM stops
+            ws.send(JSON.stringify({
+                type: 'cleanup-stream',
+                apiKey: API_KEY,
+                playerId: playerId,
+                streamKey: stream.streamKey,
+                reason: 'manual_stop'
+            }));
+
+            console.log(`📤 Stop commands sent for player ${playerId}`);
         }
+
+        // Then clean up the monitor panel
+        stopStreamInPanel(stream.panelId);
+    } else {
+        console.log(`❌ No active stream found for player ${playerId}`);
     }
 }
 
@@ -543,8 +811,37 @@ function fullscreenPanel(panelId) {
 }
 
 function updateConnectionStatus(status) {
-    console.log('📡 Status:', status, `(${isConnected ? 'Connected' : 'Disconnected'})`);
-    // You can update UI here if needed
+    const statusElement = document.getElementById('connectionStatus');
+    if (statusElement) {
+        statusElement.textContent = status;
+        statusElement.className = `connection-status ${isConnected ? 'connected' : 'disconnected'}`;
+    }
+
+    // Also check server health if disconnected
+    if (!isConnected && status === 'Disconnected') {
+        setTimeout(checkServerHealth, 1000);
+    }
+}
+
+// Check if the media server is running
+async function checkServerHealth() {
+    try {
+        const response = await fetch(`${SERVER_URL}/api/health`, {
+            method: 'GET',
+            headers: { 'x-api-key': API_KEY }
+        });
+
+        if (response.ok) {
+            const health = await response.json();
+            console.log('🏥 Server is healthy:', health);
+            console.log('🔄 Server is running but WebSocket failed - check WebSocket URL');
+        } else {
+            console.error('❌ Server health check failed:', response.status);
+        }
+    } catch (error) {
+        console.error('❌ Server not reachable:', error.message);
+        console.log('💡 Make sure the media server is running on port 3000');
+    }
 }
 
 // Initialize panels
@@ -628,11 +925,17 @@ async function startStreamInPanel(playerId, panelId) {
         return;
     }
 
-    // Check if already streaming
+    // Check if already streaming - mark as moving if changing panels
     const existingStream = activeStreams.get(playerId);
     if (existingStream) {
-        console.log('⏹️ Stopping existing stream for player', playerId);
+        console.log('⏹️ Moving existing stream for player', playerId, 'from panel', existingStream.panelId, 'to panel', panelId);
+
+        // Mark as moving to prevent full stream stop
+        existingStream.isMoving = true;
         stopStreamInPanel(existingStream.panelId);
+
+        // Wait a bit before starting in new panel to allow cleanup
+        await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
     // Stop any stream currently in this panel
@@ -669,14 +972,14 @@ async function startStreamInPanel(playerId, panelId) {
 function stopStreamInPanel(panelId) {
     // Convert to number and handle panelId 0 correctly
     panelId = parseInt(panelId);
-    
+
     console.log('⏹️ Stopping stream in panel', panelId);
-    
+
     if (panelId < 0 || panelId >= panels.length) {
         console.error('❌ Invalid panel ID:', panelId);
         return;
     }
-    
+
     const panel = panels[panelId];
     if (!panel) {
         console.error('❌ Panel not found:', panelId);
@@ -694,13 +997,42 @@ function stopStreamInPanel(panelId) {
     if (playerId) {
         const stream = activeStreams.get(playerId);
 
+        // Send cleanup notification to server with appropriate reason
+        if (ws && ws.readyState === WebSocket.OPEN && stream.streamKey) {
+            const reason = stream.isMoving ? 'panel_change' : 'panel_closed';
+            console.log(`🧹 Sending cleanup with reason: ${reason}`);
+
+            ws.send(JSON.stringify({
+                type: 'cleanup-stream',
+                apiKey: API_KEY,
+                streamKey: stream.streamKey,
+                playerId: playerId,
+                reason: reason
+            }));
+        }
+
         // Close peer connection using new Map
         const connectionInfo = panelPeerConnections.get(panelId);
         if (connectionInfo) {
             console.log('🔌 Closing peer connection for panel', panelId);
-            connectionInfo.pc.close();
+            try {
+                connectionInfo.pc.close();
+            } catch (e) {
+                console.log('⚠️ Error closing peer connection:', e);
+            }
             panelPeerConnections.delete(panelId);
             panelPeerConnections.delete(connectionInfo.streamKey);
+        }
+
+        // Stop video properly
+        if (stream.video) {
+            try {
+                stream.video.pause();
+                stream.video.srcObject = null;
+                stream.video.load(); // Reset video element
+            } catch (e) {
+                console.log('⚠️ Error stopping video:', e);
+            }
         }
 
         // Remove from map
@@ -708,7 +1040,7 @@ function stopStreamInPanel(panelId) {
 
         // Update player list
         updatePlayerStreaming(playerId, false);
-        
+
         console.log('✅ Stream stopped for player', playerId, 'in panel', panelId);
     }
 
@@ -729,6 +1061,11 @@ function stopStreamInPanel(panelId) {
             <p>or double-click player</p>
         </div>
     `;
+
+    // Re-add event listeners for drag and drop
+    panel.addEventListener('dragover', handleDragOver);
+    panel.addEventListener('drop', handleDrop);
+    panel.addEventListener('dragleave', handleDragLeave);
 }
 
 // Handle stream ended
@@ -768,7 +1105,6 @@ async function refreshPlayers() {
 
 // Update player list
 function updatePlayerList() {
-    console.log('👥 Updating player list:', players.length, 'players');
     const list = document.getElementById('playerList');
     const count = document.getElementById('playerCount');
 
@@ -820,8 +1156,6 @@ function updatePlayerList() {
 
         list.appendChild(item);
     });
-    
-    console.log('✅ Player list updated:', players.length, 'players displayed');
 }
 
 // Check if panel is active
@@ -896,7 +1230,6 @@ function stopAllStreams() {
 
 // Manual refresh function
 function refreshPlayers() {
-    console.log('🔄 Manual refresh requested');
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
             type: 'monitor-get-players',
@@ -1030,5 +1363,161 @@ window.monitorDebug = {
         }
     }
 };
+
+// Stream sharing variables
+let sharedConnections = new Map(); // sharedViewer -> RTCPeerConnection
+let isSharedViewer = false;
+let primaryViewerConnection = null;
+
+// Stream sharing functions
+function handleSharedViewerSetup(streamKey, primaryViewer) {
+    console.log(`🤝 Setting up as shared viewer for stream ${streamKey} from primary ${primaryViewer}`);
+    isSharedViewer = true;
+    // Wait for primary viewer to initiate sharing
+}
+
+function handleShareStreamRequest(sharedViewer, panelId) {
+    console.log(`🤝 Primary viewer: Creating peer connection to share stream with ${sharedViewer}`);
+
+    // Get the current stream from our video element
+    const stream = Array.from(activeStreams.values()).find(s => s.panelId !== undefined);
+    if (!stream || !stream.video || !stream.video.srcObject) {
+        console.error('❌ No active stream to share');
+        return;
+    }
+
+    const mediaStream = stream.video.srcObject;
+    console.log('🎥 Sharing stream with tracks:', mediaStream.getTracks().map(t => t.kind));
+
+    // Create peer connection for sharing
+    const pc = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+    });
+
+    // Add the stream to share
+    mediaStream.getTracks().forEach(track => {
+        pc.addTrack(track, mediaStream);
+        console.log(`🎥 Added ${track.kind} track to shared connection`);
+    });
+
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            ws.send(JSON.stringify({
+                type: 'stream-share-ice',
+                targetViewer: sharedViewer,
+                candidate: event.candidate
+            }));
+        }
+    };
+
+    // Store connection
+    sharedConnections.set(sharedViewer, pc);
+
+    // Create and send offer
+    pc.createOffer().then(offer => {
+        return pc.setLocalDescription(offer);
+    }).then(() => {
+        ws.send(JSON.stringify({
+            type: 'stream-share-offer',
+            targetViewer: sharedViewer,
+            offer: pc.localDescription
+        }));
+        console.log(`🤝 Sent stream share offer to ${sharedViewer}`);
+    }).catch(error => {
+        console.error('❌ Error creating stream share offer:', error);
+    });
+}
+
+function handleStreamShareOffer(sourceViewer, offer) {
+    console.log(`🤝 Shared viewer: Received offer from primary ${sourceViewer}`);
+
+    // Create peer connection to receive shared stream
+    primaryViewerConnection = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+    });
+
+    // Handle incoming stream
+    primaryViewerConnection.ontrack = (event) => {
+        console.log('🎥 Received shared stream from primary viewer');
+        const receivedStream = event.streams[0];
+
+        // Find the panel that's waiting for this stream
+        const stream = Array.from(activeStreams.values()).find(s => !s.video.srcObject);
+        if (stream) {
+            stream.video.srcObject = receivedStream;
+            console.log(`🎥 Applied shared stream to panel ${stream.panelId}`);
+        }
+    };
+
+    // Handle ICE candidates
+    primaryViewerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+            ws.send(JSON.stringify({
+                type: 'stream-share-ice',
+                targetViewer: sourceViewer,
+                candidate: event.candidate
+            }));
+        }
+    };
+
+    // Set remote description and create answer
+    primaryViewerConnection.setRemoteDescription(offer).then(() => {
+        return primaryViewerConnection.createAnswer();
+    }).then(answer => {
+        return primaryViewerConnection.setLocalDescription(answer);
+    }).then(() => {
+        ws.send(JSON.stringify({
+            type: 'stream-share-answer',
+            targetViewer: sourceViewer,
+            answer: primaryViewerConnection.localDescription
+        }));
+        console.log(`🤝 Sent stream share answer to ${sourceViewer}`);
+    }).catch(error => {
+        console.error('❌ Error handling stream share offer:', error);
+    });
+}
+
+function handleStreamShareAnswer(sourceViewer, answer) {
+    console.log(`🤝 Primary viewer: Received answer from shared ${sourceViewer}`);
+
+    const pc = sharedConnections.get(sourceViewer);
+    if (pc) {
+        pc.setRemoteDescription(answer).then(() => {
+            console.log(`✅ Stream sharing established with ${sourceViewer}`);
+        }).catch(error => {
+            console.error('❌ Error setting remote description for stream share:', error);
+        });
+    }
+}
+
+function handleStreamShareIce(sourceViewer, candidate) {
+    const pc = isSharedViewer ? primaryViewerConnection : sharedConnections.get(sourceViewer);
+    if (pc) {
+        pc.addIceCandidate(candidate).catch(error => {
+            console.error('❌ Error adding ICE candidate for stream share:', error);
+        });
+    }
+}
+
+function handlePromotedToPrimary(streamKey) {
+    console.log(`🔄 Promoted to primary viewer - transitioning from shared to direct WebRTC`);
+    isSharedViewer = false;
+
+    // Clean up shared connection
+    if (primaryViewerConnection) {
+        primaryViewerConnection.close();
+        primaryViewerConnection = null;
+    }
+
+    // The stream should continue normally as we're now the primary viewer
+    // Future viewers will connect to us for sharing
+}
 
 console.log('🔧 Complete monitor loaded. Available debug functions:', Object.keys(window.monitorDebug));

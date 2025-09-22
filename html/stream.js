@@ -335,10 +335,13 @@ function connectToSignalingServer(config) {
         log('WebSocket connected');
         clearReconnectTimer();
         
-        // Register as streamer
+        // Register as streamer with validation
+        const streamKey = config.streamKey || config.streamId;
+        log('Registering with stream key:', streamKey);
+
         ws.send(JSON.stringify({
             type: 'register-streamer',
-            streamKey: config.streamKey || config.streamId
+            streamKey: streamKey
         }));
         
         // Start heartbeat
@@ -347,37 +350,53 @@ function connectToSignalingServer(config) {
     
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        
+        log('WebSocket message received:', data.type);
+
         switch(data.type) {
             case 'registered':
                 log('Registered as streamer');
                 notifyStreamStarted();
                 break;
-                
+
             case 'viewer-joined':
+                log('Viewer joined message received:', data);
                 await handleViewerJoined(data.viewerId);
                 updateDebug('viewerCount', viewers.size);
                 break;
-                
+
             case 'viewer-left':
                 handleViewerLeft(data.viewerId);
                 updateDebug('viewerCount', viewers.size);
                 break;
-                
+
             case 'answer':
                 await handleAnswer(data.viewerId, data.answer);
                 break;
-                
+
             case 'ice-candidate':
                 await handleIceCandidate(data.viewerId, data.candidate);
                 break;
-                
+
+            case 'force-stop':
+                log('Received force stop command from server:', data);
+                log('Force stop reason:', data.reason || 'no reason provided');
+                notifyError('Stream stopped by server: ' + (data.reason || 'unknown reason'));
+                stopStream();
+                break;
+
             case 'ping':
                 ws.send(JSON.stringify({ type: 'pong' }));
                 break;
-                
+
             case 'error':
                 log('Server error:', data.message);
+
+                // Handle specific error cases
+                if (data.message && data.message.includes('Invalid stream key')) {
+                    log('Stream key rejected by server. Stopping stream.');
+                    notifyError('Invalid stream key: ' + (streamConfig?.streamKey || streamConfig?.streamId));
+                    stopStream();
+                }
                 break;
         }
     };
@@ -387,13 +406,24 @@ function connectToSignalingServer(config) {
         console.error('[Stream] WebSocket error:', error);
     };
     
-    ws.onclose = () => {
-        log('WebSocket closed');
+    ws.onclose = (event) => {
+        log('WebSocket closed:', event.code, event.reason);
         stopHeartbeat();
-        
-        if (isStreaming) {
+
+        // Handle different close codes
+        if (event.code === 1005) {
+            log('Connection closed without status - checking server availability');
+        } else if (event.code === 1006) {
+            log('Connection closed abnormally - network issue');
+        }
+
+        // Only reconnect if it wasn't a deliberate close (code 1000)
+        if (isStreaming && event.code !== 1000) {
             log('Unexpected disconnect, attempting reconnect...');
             scheduleReconnect();
+        } else if (event.code === 1000) {
+            log('Connection closed deliberately, stopping stream');
+            stopStream();
         }
     };
 }
@@ -454,21 +484,28 @@ function clearReconnectTimer() {
 
 async function handleViewerJoined(viewerId) {
     log('Viewer joined:', viewerId);
-    
+    log('Local stream available:', !!localStream);
+    log('Local stream tracks:', localStream ? localStream.getTracks().length : 0);
+
     const configuration = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
         ]
     };
-    
+
     const viewerPc = new RTCPeerConnection(configuration);
-    
+
     // Add tracks
     if (localStream) {
-        localStream.getTracks().forEach(track => {
+        const tracks = localStream.getTracks();
+        tracks.forEach(track => {
+            log('Adding track to peer connection:', track.kind, track.enabled);
             viewerPc.addTrack(track, localStream);
         });
+        log('Added', tracks.length, 'tracks to peer connection');
+    } else {
+        log('ERROR: No local stream available for viewer connection');
     }
     
     // ICE candidates
@@ -496,17 +533,24 @@ async function handleViewerJoined(viewerId) {
     
     // Create offer
     try {
+        log('Creating offer for viewer:', viewerId);
         const offer = await viewerPc.createOffer();
         await viewerPc.setLocalDescription(offer);
-        
-        ws.send(JSON.stringify({
+
+        log('Offer created, sending to server');
+        const offerMessage = {
             type: 'offer',
             offer: offer,
             viewerId: viewerId
-        }));
-        
+        };
+
+        log('Sending offer message:', offerMessage);
+        ws.send(JSON.stringify(offerMessage));
+        log('Offer sent successfully for viewer:', viewerId);
+
     } catch (error) {
         console.error('[Stream] Offer error:', error);
+        log('Failed to create/send offer for viewer:', viewerId, error.message);
     }
 }
 
@@ -545,37 +589,72 @@ async function handleIceCandidate(viewerId, candidate) {
 function stopStream() {
     log('Stopping stream');
     isStreaming = false;
-    
+
     // Clear timers
     clearReconnectTimer();
     stopHeartbeat();
-    
+
     // Close viewer connections
-    viewers.forEach(pc => pc.close());
+    viewers.forEach(pc => {
+        try {
+            pc.close();
+        } catch (e) {
+            log('Error closing peer connection:', e);
+        }
+    });
     viewers.clear();
     updateDebug('viewerCount', '0');
-    
-    // Close WebSocket
+
+    // Close WebSocket with proper cleanup code
     if (ws) {
-        ws.close();
+        try {
+            // Send cleanup notification before closing
+            if (ws.readyState === WebSocket.OPEN && streamConfig) {
+                ws.send(JSON.stringify({
+                    type: 'cleanup-stream',
+                    streamKey: streamConfig.streamKey || streamConfig.streamId,
+                    playerId: streamConfig.playerId,
+                    reason: 'manual_stop'
+                }));
+            }
+            ws.close(1000, 'Stream stopped');
+        } catch (e) {
+            log('Error closing WebSocket:', e);
+        }
         ws = null;
     }
-    
+
     // Stop MainRender
     if (renderStarted && typeof MainRender !== 'undefined' && MainRender.stop) {
         MainRender.stop();
         renderStarted = false;
     }
-    
+
     // Stop local stream
     if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
+        localStream.getTracks().forEach(track => {
+            try {
+                track.stop();
+            } catch (e) {
+                log('Error stopping track:', e);
+            }
+        });
         localStream = null;
     }
-    
+
     updateDebug('status', 'Stopped');
     updateDebug('streamId', '-');
     streamConfig = null;
+
+    // Force garbage collection by clearing canvas
+    const canvas = document.getElementById('stream-canvas');
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        canvas.style.display = 'none';
+    }
 }
 
 function startFPSMonitoring(canvas) {

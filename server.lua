@@ -59,16 +59,24 @@ function HandleStreamRequest(request)
     local streamId = request.streamId
     local streamKey = request.streamKey
     local panelId = request.panelId
-    
+
     if not GetPlayerName(playerId) then
         print(string.format("^1[Stream Request]^7 Player %d not found", playerId))
         return
     end
-    
-    -- Check if already streaming
+
+    -- Check if already streaming - force cleanup and restart if needed
     if activeStreams[playerId] then
-        print(string.format("^3[Stream Request]^7 Player %d already streaming", playerId))
-        return
+        print(string.format("^3[Stream Request]^7 Player %d already streaming - cleaning up for restart", playerId))
+
+        -- Stop the existing stream first
+        TriggerClientEvent('redm_streamer:stopStream', playerId)
+
+        -- Clean up immediately to allow restart
+        activeStreams[playerId] = nil
+
+        -- Wait a moment for cleanup to complete
+        Wait(500)
     end
     
     print(string.format("^2[Stream Request]^7 Starting stream for player %d (ID: %s)", playerId, streamId))
@@ -228,25 +236,33 @@ RegisterNetEvent('redm_streamer:stopStream')
 AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
     local source = source
     local playerId = targetPlayerId or source
-    
+
     if activeStreams[playerId] then
         local stream = activeStreams[playerId]
-        
-        -- Notify media server
+
+        -- Force notify media server multiple times to ensure cleanup
         CallMediaServer("/monitor/stream-ended", "POST", {
             playerId = playerId,
             streamId = stream.streamId,
             streamKey = stream.streamKey,
             reason = "manual_stop"
         })
-        
-        -- Notify player
+
+        -- Also send cleanup request
+        CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST", {
+            playerId = playerId,
+            reason = "force_stop"
+        })
+
+        -- Notify player with force stop
         TriggerClientEvent('redm_streamer:stopStream', playerId)
-        
-        -- Clean up
-        activeStreams[playerId] = nil
-        
-        print(string.format("^2[Monitor]^7 Stream stopped for player %d", playerId))
+
+        -- Wait a bit then clean up
+        SetTimeout(1000, function()
+            activeStreams[playerId] = nil
+        end)
+
+        print(string.format("^2[Monitor]^7 Stream force stopped for player %d", playerId))
     end
 end)
 
@@ -319,25 +335,28 @@ end, false)
 -- Clean up on player drop
 AddEventHandler('playerDropped', function()
     local playerId = source
-    
+
     if activeStreams[playerId] then
         local stream = activeStreams[playerId]
-        
-        print(string.format("^3[Cleanup]^7 Player %d dropped, cleaning stream %s", playerId, stream.streamId))
-        
-        -- Give 10 seconds for reconnect
-        SetTimeout(10000, function()
-            if activeStreams[playerId] and activeStreams[playerId].streamId == stream.streamId then
-                CallMediaServer("/monitor/stream-ended", "POST", {
-                    playerId = playerId,
-                    streamId = stream.streamId,
-                    streamKey = stream.streamKey,
-                    reason = "player_disconnected"
-                })
-                activeStreams[playerId] = nil
-                print(string.format("^3[Cleanup]^7 Stream %s cleaned after timeout", stream.streamId))
-            end
-        end)
+
+        print(string.format("^3[Cleanup]^7 Player %d dropped, immediately cleaning stream %s", playerId, stream.streamId))
+
+        -- Immediate cleanup instead of waiting
+        CallMediaServer("/monitor/stream-ended", "POST", {
+            playerId = playerId,
+            streamId = stream.streamId,
+            streamKey = stream.streamKey,
+            reason = "player_disconnected"
+        })
+
+        -- Also force cleanup via different endpoint
+        CallMediaServer("/streams/" .. stream.streamId .. "/stop", "POST", {
+            playerId = playerId,
+            reason = "player_disconnected"
+        })
+
+        activeStreams[playerId] = nil
+        print(string.format("^3[Cleanup]^7 Stream %s cleaned immediately", stream.streamId))
     end
 end)
 
