@@ -1,7 +1,35 @@
 // Monitor Panel JavaScript
 const API_KEY = 'redm-media-server-key-2024';
-let SERVER_URL = localStorage.getItem('serverUrl') || 'http://localhost:3000';
-let WS_URL = localStorage.getItem('wsUrl') || 'ws://localhost:3000/ws';
+
+// Auto-detect server URL based on current page URL
+function getDefaultServerUrl() {
+    const currentHost = window.location.hostname;
+    const currentPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+
+    // If accessing from localhost, use localhost
+    if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
+        return 'http://localhost:3000';
+    }
+
+    // Otherwise, use the current hostname with port 3000
+    return `${window.location.protocol}//${currentHost}:3000`;
+}
+
+function getDefaultWsUrl() {
+    const currentHost = window.location.hostname;
+
+    // If accessing from localhost, use localhost
+    if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
+        return 'ws://localhost:3000/ws';
+    }
+
+    // Otherwise, use the current hostname with port 3000
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${currentHost}:3000/ws`;
+}
+
+let SERVER_URL = localStorage.getItem('serverUrl') || getDefaultServerUrl();
+let WS_URL = localStorage.getItem('wsUrl') || getDefaultWsUrl();
 let panels = [];
 let players = [];
 let activeStreams = new Map();
@@ -63,6 +91,17 @@ function getDefaultWebRTCConfig() {
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('📱 DOM Ready - Initializing UI...');
+
+    // Show auto-detected URLs if not localhost
+    if (!localStorage.getItem('serverUrl') || !localStorage.getItem('wsUrl')) {
+        const currentHost = window.location.hostname;
+        if (currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
+            console.log('🌐 Auto-detected remote access from:', currentHost);
+            console.log('📡 Using Server URL:', SERVER_URL);
+            console.log('🔗 Using WebSocket URL:', WS_URL);
+            console.log('💡 You can change these in Settings if needed');
+        }
+    }
 
     // Initialize video monitoring system
     window.videoMonitors = new Map();
