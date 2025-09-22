@@ -23,21 +23,56 @@ local function CallMediaServer(endpoint, method, data, callback)
     end, method, data and json.encode(data) or "{}", headers)
 end
 
--- Initialize and start polling for stream requests
+-- Initialize and start polling for stream requests with auto-reconnection
+local mediaServerConnected = false
+local reconnectAttempts = 0
+local maxReconnectAttempts = -1 -- Infinite attempts
+
 CreateThread(function()
     Wait(5000)
-    CallMediaServer("/health", "GET", nil, function(success, data)
-        if success then
-            print("^2[RedM Streamer]^7 Connected to media server")
-            -- Start polling for stream requests
-            CreateThread(function()
-                while true do
-                    Wait(5000) -- Poll every 5 seconds
-                    PollForStreamRequests()
+
+    local function attemptConnection()
+        CallMediaServer("/health", "GET", nil, function(success, data)
+            if success then
+                if not mediaServerConnected then
+                    print("^2[RedM Streamer]^7 Connected to media server")
+                    mediaServerConnected = true
+                    reconnectAttempts = 0
                 end
-            end)
-        else
-            print("^1[RedM Streamer]^7 Media server not available")
+            else
+                if mediaServerConnected then
+                    print("^3[RedM Streamer]^7 Lost connection to media server")
+                    mediaServerConnected = false
+                end
+                reconnectAttempts = reconnectAttempts + 1
+
+                if reconnectAttempts <= 3 then
+                    print("^1[RedM Streamer]^7 Media server not available (attempt " .. reconnectAttempts .. ")")
+                elseif reconnectAttempts % 12 == 0 then -- Every minute (5s * 12 = 60s)
+                    print("^1[RedM Streamer]^7 Still trying to connect to media server...")
+                end
+            end
+        end)
+    end
+
+    -- Initial connection attempt
+    attemptConnection()
+
+    -- Start polling for stream requests (runs regardless of connection status)
+    CreateThread(function()
+        while true do
+            Wait(5000) -- Poll every 5 seconds
+            if mediaServerConnected then
+                PollForStreamRequests()
+            end
+        end
+    end)
+
+    -- Continuous health check and reconnection
+    CreateThread(function()
+        while true do
+            Wait(5000) -- Check every 5 seconds
+            attemptConnection()
         end
     end)
 end)
@@ -119,7 +154,7 @@ local lastPlayerListHash = ""
 
 CreateThread(function()
     while true do
-        Wait(30000) -- Further reduced frequency: every 30 seconds
+        Wait(5000) -- Increased frequency: every 5 seconds for better responsiveness
 
         -- Build lightweight player list - avoid expensive operations
         local players = {}

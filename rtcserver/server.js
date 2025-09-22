@@ -254,18 +254,23 @@ app.post('/api/monitor/stream-started', authenticateAPI, (req, res) => {
 
 // Endpoint to get WebRTC configuration (ICE servers, TURN settings)
 app.get('/api/webrtc/config', (req, res) => {
-    const turnEnabled = false; // Disable TURN completely for now
+    const turnEnabled = process.env.TURN_ENABLED === 'true'; // Enable TURN based on environment
     const forceRelayOnly = process.env.FORCE_RELAY_ONLY === 'true';
 
     const iceServers = [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
     ];
 
     // Add built-in TURN server
     if (turnEnabled) {
+        // Get the server's external IP from the request or use a configured IP
+        const serverHost = req.get('host').split(':')[0];
         iceServers.push({
-            urls: `turn:localhost:${TURN_PORT}`,
+            urls: `turn:${serverHost}:${TURN_PORT}`,
             username: 'redm-turn-user',
             credential: 'redm-turn-pass'
         });
@@ -1493,33 +1498,45 @@ function handleWSStreamFrame(clientId, ws, data) {
 
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Media server running on port ${PORT}`);
+    console.log(`📡 Monitor: http://0.0.0.0:${PORT}/monitor`);
 
-
-
-
-
-
-
-
-
-    // TURN server disabled for now
-
-
+    // Start TURN server if enabled
+    if (process.env.TURN_ENABLED === 'true') {
+        try {
+            turnServer.start();
+            console.log(`🔄 TURN server started on port ${TURN_PORT} for remote WebRTC access`);
+        } catch (error) {
+            console.error('❌ Failed to start TURN server:', error);
+        }
+    } else {
+        console.log('⚠️ TURN server disabled - WebRTC may not work for remote clients');
+    }
 });
 
 // Handle shutdown
 process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down server...');
 
-    
+    // Stop TURN server if running
+    if (process.env.TURN_ENABLED === 'true') {
+        try {
+            turnServer.stop();
+            console.log('🔄 TURN server stopped');
+        } catch (error) {
+            console.error('❌ Error stopping TURN server:', error);
+        }
+    }
+
     // Close all WebSocket connections
     wss.clients.forEach(ws => {
         ws.close();
     });
-    
+
     wss.close(() => {
-
+        console.log('📡 WebSocket server stopped');
         server.close(() => {
-
+            console.log('🚀 HTTP server stopped');
             process.exit(0);
         });
     });
