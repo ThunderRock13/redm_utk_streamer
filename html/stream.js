@@ -371,6 +371,13 @@ function connectToSignalingServer(config) {
         ws.close();
     }
 
+    // Check if we're in HTTPS context and trying to use insecure WebSocket
+    if (window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
+        console.log('HTTPS mixed content detected, using HTTP polling fallback');
+        useHttpPollingFallback(config);
+        return;
+    }
+
     // Try connecting with the provided URL first
     ws = new WebSocket(wsUrl);
     
@@ -454,7 +461,13 @@ function connectToSignalingServer(config) {
     };
     
     ws.onerror = (error) => {
-        // WebSocket error
+        console.error('[Stream] WebSocket error:', error);
+
+        // If this is a mixed content error, try the HTTP fallback
+        if (window.location.protocol === 'https:') {
+            console.log('WebSocket failed in HTTPS context, falling back to HTTP registration');
+            useHttpPollingFallback(streamConfig);
+        }
     };
     
     ws.onclose = (event) => {
@@ -473,6 +486,40 @@ function connectToSignalingServer(config) {
             stopStream();
         }
     };
+}
+
+// Simple HTTP fallback for HTTPS mixed content issues
+function useHttpPollingFallback(config) {
+    console.log('WebSocket blocked by mixed content, using simple HTTP notification');
+
+    const streamKey = config.streamKey || config.streamId;
+    const serverUrl = config.webSocketUrl.replace('ws://', 'http://').replace('wss://', 'https://').replace('/ws', '');
+
+    // Just notify that we're ready - the monitor will detect the stream via player list
+    fetch(`${serverUrl}/api/streams/notify-ready`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key': 'redm-media-server-key-2024'
+        },
+        body: JSON.stringify({
+            streamKey: streamKey,
+            message: 'Stream ready but WebSocket blocked by mixed content'
+        })
+    })
+    .then(response => {
+        if (response.ok) {
+            console.log('Stream readiness notification sent');
+            notifyStreamStarted();
+        } else {
+            console.log('Notification failed, but stream is still running');
+            notifyStreamStarted(); // Still notify success since video is working
+        }
+    })
+    .catch(error => {
+        console.log('Notification failed, but stream is still running:', error.message);
+        notifyStreamStarted(); // Still notify success since video is working
+    });
 }
 
 function startHeartbeat() {

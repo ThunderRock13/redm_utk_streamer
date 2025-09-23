@@ -299,6 +299,33 @@ app.get('/api/webrtc/config', (req, res) => {
     res.json(config);
 });
 
+// Simple HTTP notification endpoint for mixed content fallback
+app.post('/api/streams/notify-ready', authenticateAPI, (req, res) => {
+    const { streamKey, message } = req.body;
+
+    console.log('Stream ready notification:', streamKey, '-', message);
+
+    // Find the stream
+    let stream = null;
+    for (const [id, s] of activeStreams) {
+        if (s.streamKey === streamKey) {
+            stream = s;
+            break;
+        }
+    }
+
+    if (stream) {
+        stream.httpNotified = true;
+        console.log('Stream marked as ready via HTTP notification');
+    }
+
+    // Always respond with success - this is just a notification
+    res.json({
+        success: true,
+        message: 'Notification received'
+    });
+});
+
 // Endpoint for RedM server to notify stream ended
 app.post('/api/monitor/stream-ended', authenticateAPI, (req, res) => {
     const { playerId, streamId, streamKey, reason } = req.body;
