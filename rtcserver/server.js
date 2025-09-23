@@ -435,13 +435,20 @@ function processBridgeMessage(streamKey, message) {
 // Helper function to forward messages to viewers
 function forwardToViewers(streamKey, message) {
     // Find viewers for this stream and forward the message
+    console.log(`[BRIDGE] Forwarding ${message.type} to viewers for stream ${streamKey}`);
+    let forwardedCount = 0;
+
     for (const [clientId, connection] of connections) {
-        if (connection.role === 'viewer' && connection.streamKey === streamKey) {
+        if ((connection.role === 'viewer' || connection.role === 'monitor') && connection.streamKey === streamKey) {
             if (connection.ws && connection.ws.readyState === WebSocket.OPEN) {
+                console.log(`[BRIDGE] Forwarding ${message.type} to ${connection.role} ${clientId}`);
                 connection.ws.send(JSON.stringify(message));
+                forwardedCount++;
             }
         }
     }
+
+    console.log(`[BRIDGE] Forwarded ${message.type} to ${forwardedCount} viewers for stream ${streamKey}`);
 }
 
 // Helper function to send message to bridge
