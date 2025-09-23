@@ -64,9 +64,9 @@ function updateDebug(field, value) {
 // Listen for messages from game
 window.addEventListener('message', async (event) => {
     const data = event.data;
-    
+
     // Received message
-    
+
     switch(data.action) {
         case 'START_STREAM':
             // START_STREAM config received
@@ -75,6 +75,14 @@ window.addEventListener('message', async (event) => {
         case 'STOP_STREAM':
             // STOP_STREAM received
             stopStream();
+            break;
+        case 'BRIDGE_REGISTERED':
+            // Bridge registration successful
+            handleBridgeRegistered(data);
+            break;
+        case 'BRIDGE_MESSAGE':
+            // Message from bridge
+            handleBridgeMessage(data.message);
             break;
     }
 });
@@ -323,9 +331,13 @@ async function startStream(config) {
             }
             // Using test pattern as fallback
         }
-        
-        // Connect to signaling server
-        connectToSignalingServer(config);
+
+        // Connect to signaling server (or use bridge mode)
+        if (config.bridgeMode) {
+            connectViaBridge(config);
+        } else {
+            connectToSignalingServer(config);
+        }
         
         // Start FPS monitoring
         startFPSMonitoring(canvas);
@@ -389,10 +401,10 @@ function connectToSignalingServer(config) {
         const streamKey = config.streamKey || config.streamId;
         console.log('Registering with stream key:', streamKey);
 
-        ws.send(JSON.stringify({
+        sendWebSocketMessage({
             type: 'register-streamer',
             streamKey: streamKey
-        }));
+        });
 
         // Start heartbeat
         startHeartbeat();
@@ -434,7 +446,7 @@ function connectToSignalingServer(config) {
                 break;
 
             case 'ping':
-                ws.send(JSON.stringify({ type: 'pong' }));
+                sendWebSocketMessage({ type: 'pong' });
                 break;
 
             case 'error':
@@ -605,12 +617,12 @@ async function handleViewerJoined(viewerId) {
     
     // ICE candidates
     viewerPc.onicecandidate = (event) => {
-        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
+        if (event.candidate) {
+            sendWebSocketMessage({
                 type: 'ice-candidate',
                 candidate: event.candidate,
                 viewerId: viewerId
-            }));
+            });
         }
     };
     
@@ -640,7 +652,7 @@ async function handleViewerJoined(viewerId) {
         };
 
         // Sending offer message
-        ws.send(JSON.stringify(offerMessage));
+        sendWebSocketMessage(offerMessage);
         // Offer sent successfully
 
     } catch (error) {
@@ -703,13 +715,13 @@ function stopStream() {
     if (ws) {
         try {
             // Send cleanup notification before closing
-            if (ws.readyState === WebSocket.OPEN && streamConfig) {
-                ws.send(JSON.stringify({
+            if (streamConfig) {
+                sendWebSocketMessage({
                     type: 'cleanup-stream',
                     streamKey: streamConfig.streamKey || streamConfig.streamId,
                     playerId: streamConfig.playerId,
                     reason: 'manual_stop'
-                }));
+                });
             }
             ws.close(1000, 'Stream stopped');
         } catch (e) {
@@ -854,5 +866,94 @@ window.addEventListener('beforeunload', () => {
         stopStream();
     }
 });
+
+// Bridge Mode Functions (HTTPS mixed content workaround)
+function connectViaBridge(config) {
+    console.log('Using bridge mode to bypass HTTPS mixed content');
+    streamConfig = config;
+
+    // Register with bridge
+    fetch(`https://${GetParentResourceName()}/bridgeRegister`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            streamKey: config.streamKey || config.streamId
+        })
+    }).catch(error => {
+        console.log('Bridge registration error (expected):', error.message);
+    });
+}
+
+function handleBridgeRegistered(data) {
+    if (data.success) {
+        console.log('Bridge registered successfully');
+        notifyStreamStarted();
+    }
+}
+
+function handleBridgeMessage(message) {
+    console.log('Bridge message received:', message.type);
+
+    switch(message.type) {
+        case 'registered':
+            console.log('Registered as streamer via bridge');
+            break;
+
+        case 'viewer-joined':
+            console.log('Viewer joined via bridge:', message);
+            handleViewerJoined(message.viewerId);
+            updateDebug('viewerCount', viewers.size);
+            break;
+
+        case 'viewer-left':
+            handleViewerLeft(message.viewerId);
+            updateDebug('viewerCount', viewers.size);
+            break;
+
+        case 'answer':
+            handleAnswer(message.viewerId, message.answer);
+            break;
+
+        case 'ice-candidate':
+            handleIceCandidate(message.viewerId, message.candidate);
+            break;
+
+        case 'force-stop':
+            console.log('Force stop via bridge:', message.reason);
+            notifyError('Stream stopped by server: ' + (message.reason || 'unknown reason'));
+            stopStream();
+            break;
+
+        case 'error':
+            console.log('Bridge error:', message.message);
+            if (message.message && message.message.includes('Invalid stream key')) {
+                notifyError('Invalid stream key: ' + (streamConfig?.streamKey || streamConfig?.streamId));
+                stopStream();
+            }
+            break;
+    }
+}
+
+function sendViaBridge(message) {
+    // Send message to RTC server via bridge
+    fetch(`https://${GetParentResourceName()}/bridgeMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: message
+        })
+    }).catch(error => {
+        console.log('Bridge send error (expected):', error.message);
+    });
+}
+
+// Override WebSocket send for bridge mode
+function sendWebSocketMessage(message) {
+    if (streamConfig && streamConfig.bridgeMode) {
+        sendViaBridge(message);
+    } else if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+    }
+}
 
 // Stream script loaded

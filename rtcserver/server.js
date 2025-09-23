@@ -326,6 +326,128 @@ app.post('/api/streams/notify-ready', authenticateAPI, (req, res) => {
     });
 });
 
+// Bridge API endpoints for HTTPS mixed content workaround
+const bridgeConnections = new Map(); // streamKey -> { playerId, playerName, messageQueue: [], lastPoll: timestamp }
+
+app.post('/api/bridge/register', authenticateAPI, (req, res) => {
+    const { streamKey, playerId, playerName } = req.body;
+
+    console.log('Bridge registration:', streamKey, 'for player', playerId);
+
+    // Initialize bridge connection
+    bridgeConnections.set(streamKey, {
+        playerId,
+        playerName,
+        messageQueue: [],
+        lastPoll: Date.now()
+    });
+
+    // Simulate WebSocket registration
+    const registrationMessage = {
+        type: 'registered',
+        streamKey,
+        timestamp: Date.now()
+    };
+
+    // Add to message queue
+    const bridge = bridgeConnections.get(streamKey);
+    if (bridge) {
+        bridge.messageQueue.push(registrationMessage);
+    }
+
+    res.json({ success: true, message: 'Bridge registered' });
+});
+
+app.post('/api/bridge/poll', authenticateAPI, (req, res) => {
+    const { streamKey, playerId } = req.body;
+
+    const bridge = bridgeConnections.get(streamKey);
+    if (!bridge) {
+        return res.json({ messages: [] });
+    }
+
+    // Update last poll time
+    bridge.lastPoll = Date.now();
+
+    // Get pending messages
+    const messages = bridge.messageQueue.splice(0); // Get all messages and clear queue
+
+    res.json({ messages });
+});
+
+app.post('/api/bridge/send', authenticateAPI, (req, res) => {
+    const { streamKey, playerId, message } = req.body;
+
+    console.log('Bridge message received:', message.type, 'for stream', streamKey);
+
+    // Process the message as if it came from WebSocket
+    processBridgeMessage(streamKey, message);
+
+    res.json({ success: true });
+});
+
+app.post('/api/bridge/cleanup', authenticateAPI, (req, res) => {
+    const { streamKey, playerId, reason } = req.body;
+
+    console.log('Bridge cleanup:', streamKey, 'reason:', reason);
+
+    // Remove bridge connection
+    bridgeConnections.delete(streamKey);
+
+    // Clean up any associated streams
+    for (const [id, stream] of activeStreams) {
+        if (stream.streamKey === streamKey) {
+            activeStreams.delete(id);
+            console.log('Cleaned up stream:', id);
+            break;
+        }
+    }
+
+    res.json({ success: true });
+});
+
+// Helper function to process bridge messages
+function processBridgeMessage(streamKey, message) {
+    // Handle different message types as if they came from WebSocket
+    switch (message.type) {
+        case 'register-streamer':
+            // Already handled in registration
+            break;
+
+        case 'offer':
+        case 'answer':
+        case 'ice-candidate':
+            // These need to be forwarded to viewers
+            forwardToViewers(streamKey, message);
+            break;
+
+        case 'cleanup-stream':
+            // Handle stream cleanup
+            bridgeConnections.delete(streamKey);
+            break;
+    }
+}
+
+// Helper function to forward messages to viewers
+function forwardToViewers(streamKey, message) {
+    // Find viewers for this stream and forward the message
+    for (const [clientId, connection] of connections) {
+        if (connection.role === 'viewer' && connection.streamKey === streamKey) {
+            if (connection.ws && connection.ws.readyState === WebSocket.OPEN) {
+                connection.ws.send(JSON.stringify(message));
+            }
+        }
+    }
+}
+
+// Helper function to send message to bridge
+function sendToBridge(streamKey, message) {
+    const bridge = bridgeConnections.get(streamKey);
+    if (bridge) {
+        bridge.messageQueue.push(message);
+    }
+}
+
 // Endpoint for RedM server to notify stream ended
 app.post('/api/monitor/stream-ended', authenticateAPI, (req, res) => {
     const { playerId, streamId, streamKey, reason } = req.body;
@@ -943,15 +1065,19 @@ function handleViewerRegistration(clientId, ws, data) {
 
 
 
-        if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
         const viewerMessage = {
             type: 'viewer-joined',
             viewerId: clientId,
             panelId: panelId  // Include panelId in viewer-joined message
         };
 
+        // Send to WebSocket if available
+        if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
+            stream.streamerWs.send(JSON.stringify(viewerMessage));
+        }
 
-        stream.streamerWs.send(JSON.stringify(viewerMessage));
+        // Also send to bridge if registered
+        sendToBridge(streamKey, viewerMessage);
 
 
     } else {

@@ -485,3 +485,129 @@ function GenerateStreamId()
     end
     return streamId
 end
+
+-- Bridge system for HTTPS mixed content workaround
+local bridgeConnections = {} -- playerId -> { streamKey, messageQueue, pollTimer }
+
+-- Bridge registration event from client
+RegisterNetEvent('redm_streamer:bridgeRegister')
+AddEventHandler('redm_streamer:bridgeRegister', function(data)
+    local source = source
+    local streamKey = data.streamKey
+    local playerId = data.playerId
+    local playerName = data.playerName
+
+    print(string.format("^2[Bridge]^7 Registering bridge for player %d with stream key %s", playerId, streamKey))
+
+    -- Register with RTC server
+    CallMediaServer('/api/bridge/register', 'POST', {
+        streamKey = streamKey,
+        playerId = playerId,
+        playerName = playerName
+    }, function(success, response)
+        if success then
+            print(string.format("^2[Bridge]^7 Successfully registered with RTC server for player %d", playerId))
+
+            -- Initialize bridge connection tracking
+            bridgeConnections[playerId] = {
+                streamKey = streamKey,
+                messageQueue = {},
+                lastPoll = os.time()
+            }
+
+            -- Start polling for messages from RTC server
+            startBridgePolling(playerId)
+
+            -- Notify client of successful registration
+            TriggerClientEvent('redm_streamer:bridgeRegistered', source, true)
+        else
+            print(string.format("^1[Bridge]^7 Failed to register with RTC server for player %d", playerId))
+            TriggerClientEvent('redm_streamer:bridgeRegistered', source, false)
+        end
+    end)
+end)
+
+-- Bridge message event from client
+RegisterNetEvent('redm_streamer:bridgeMessage')
+AddEventHandler('redm_streamer:bridgeMessage', function(data)
+    local source = source
+    local streamKey = data.streamKey
+    local playerId = data.playerId
+    local message = data.message
+
+    print(string.format("^2[Bridge]^7 Forwarding message from player %d: %s", playerId, message.type))
+
+    -- Forward message to RTC server
+    CallMediaServer('/api/bridge/send', 'POST', {
+        streamKey = streamKey,
+        playerId = playerId,
+        message = message
+    }, function(success, response)
+        if not success then
+            print(string.format("^1[Bridge]^7 Failed to send message to RTC server for player %d", playerId))
+        end
+    end)
+end)
+
+-- Start polling for messages from RTC server
+function startBridgePolling(playerId)
+    local bridge = bridgeConnections[playerId]
+    if not bridge then
+        return
+    end
+
+    -- Create timer to poll every 2 seconds (less aggressive than client polling)
+    CreateThread(function()
+        while bridgeConnections[playerId] do
+            Wait(2000) -- Poll every 2 seconds
+
+            local currentBridge = bridgeConnections[playerId]
+            if not currentBridge then
+                break
+            end
+
+            -- Poll RTC server for messages
+            CallMediaServer('/api/bridge/poll', 'POST', {
+                streamKey = currentBridge.streamKey,
+                playerId = playerId
+            }, function(success, response)
+                if success and response and response.messages then
+                    -- Forward messages to client
+                    for _, message in ipairs(response.messages) do
+                        if GetPlayerName(playerId) then -- Check if player still connected
+                            TriggerClientEvent('redm_streamer:bridgeMessage', playerId, message)
+                        else
+                            -- Player disconnected, clean up bridge
+                            cleanupBridge(playerId)
+                            break
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+-- Clean up bridge connection
+function cleanupBridge(playerId)
+    local bridge = bridgeConnections[playerId]
+    if bridge then
+        print(string.format("^3[Bridge]^7 Cleaning up bridge for player %d", playerId))
+
+        -- Notify RTC server of cleanup
+        CallMediaServer('/api/bridge/cleanup', 'POST', {
+            streamKey = bridge.streamKey,
+            playerId = playerId,
+            reason = 'player_disconnected'
+        })
+
+        -- Remove from tracking
+        bridgeConnections[playerId] = nil
+    end
+end
+
+-- Clean up bridge on player disconnect
+AddEventHandler('playerDropped', function()
+    local playerId = source
+    cleanupBridge(playerId)
+end)

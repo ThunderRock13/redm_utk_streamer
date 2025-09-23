@@ -2,6 +2,9 @@ local isStreaming = false
 local currentStreamId = nil
 local streamConfig = nil
 
+-- WebSocket bridge for HTTPS mixed content workaround
+local bridgeActive = false
+
 -- Start streaming (triggered by server)
 RegisterNetEvent('redm_streamer:startStream')
 AddEventHandler('redm_streamer:startStream', function(config)
@@ -18,17 +21,20 @@ AddEventHandler('redm_streamer:startStream', function(config)
     -- Make sure NUI is ready
     Wait(1000)
     
-    -- Send configuration to NUI with proper websocket URL
+    -- Enable bridge mode for HTTPS mixed content workaround
+    bridgeActive = true
+
+    -- Send configuration to NUI (bridge mode - no WebSocket needed)
     local nuiMessage = {
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        webSocketUrl = config.webSocketUrl or 'ws://localhost:3000/ws',
+        bridgeMode = true, -- Tell NUI to use bridge instead of direct WebSocket
         stunServer = config.stunServer or 'stun:stun.l.google.com:19302',
         turnServer = config.turnServer,
         quality = Config.StreamQuality
     }
-    
+
     SendNUIMessage(nuiMessage)
     
     -- Show notification
@@ -49,7 +55,10 @@ AddEventHandler('redm_streamer:stopStream', function()
     if not isStreaming then
         return
     end
-    
+
+    -- Disable bridge mode
+    bridgeActive = false
+
     -- Update server with stream stop
     if currentStreamId then
         TriggerServerEvent('redm_streamer:updateStats', {
@@ -58,16 +67,16 @@ AddEventHandler('redm_streamer:stopStream', function()
             timestamp = GetGameTimer()
         })
     end
-    
+
     isStreaming = false
     currentStreamId = nil
     streamConfig = nil
-    
+
     -- Tell NUI to stop
     SendNUIMessage({
         action = 'STOP_STREAM'
     })
-    
+
     ShowNotification("~r~Stream Stopped~s~")
 end)
 
@@ -137,6 +146,31 @@ RegisterNUICallback('streamStats', function(data, cb)
 end)
 
 RegisterNUICallback('debugLog', function(data, cb)
+    cb('ok')
+end)
+
+-- Bridge mode NUI callbacks
+RegisterNUICallback('bridgeRegister', function(data, cb)
+    if bridgeActive and streamConfig then
+        -- Tell server to register with RTC server
+        TriggerServerEvent('redm_streamer:bridgeRegister', {
+            streamKey = data.streamKey,
+            playerId = GetPlayerServerId(PlayerId()),
+            playerName = GetPlayerName(PlayerId())
+        })
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('bridgeMessage', function(data, cb)
+    if bridgeActive and streamConfig then
+        -- Forward message to server which will handle RTC communication
+        TriggerServerEvent('redm_streamer:bridgeMessage', {
+            streamKey = streamConfig.streamKey or streamConfig.streamId,
+            playerId = GetPlayerServerId(PlayerId()),
+            message = data.message
+        })
+    end
     cb('ok')
 end)
 
@@ -242,3 +276,24 @@ exports('startStreaming', StartStreamingExport)
 exports('stopStreaming', StopStreamingExport)
 exports('getStreamStatus', GetStreamStatusExport)
 exports('isStreaming', function() return isStreaming end)
+
+-- Bridge message events from server
+RegisterNetEvent('redm_streamer:bridgeRegistered')
+AddEventHandler('redm_streamer:bridgeRegistered', function(success)
+    if bridgeActive then
+        SendNUIMessage({
+            action = 'BRIDGE_REGISTERED',
+            success = success
+        })
+    end
+end)
+
+RegisterNetEvent('redm_streamer:bridgeMessage')
+AddEventHandler('redm_streamer:bridgeMessage', function(message)
+    if bridgeActive then
+        SendNUIMessage({
+            action = 'BRIDGE_MESSAGE',
+            message = message
+        })
+    end
+end)
