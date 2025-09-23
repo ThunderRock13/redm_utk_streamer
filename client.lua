@@ -21,15 +21,12 @@ AddEventHandler('redm_streamer:startStream', function(config)
     -- Make sure NUI is ready
     Wait(1000)
     
-    -- Enable bridge mode for HTTPS mixed content workaround
-    bridgeActive = true
-
-    -- Send configuration to NUI (bridge mode - no WebSocket needed)
+    -- Send configuration to NUI (direct WebSocket mode)
     local nuiMessage = {
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        bridgeMode = true, -- Tell NUI to use bridge instead of direct WebSocket
+        webSocketUrl = string.format('ws://%s:%s/ws', Config.Server.hostname, Config.Server.port),
         stunServer = config.stunServer or 'stun:stun.l.google.com:19302',
         turnServer = config.turnServer,
         quality = Config.StreamQuality
@@ -56,7 +53,7 @@ AddEventHandler('redm_streamer:stopStream', function()
         return
     end
 
-    -- Disable bridge mode
+    -- Direct WebSocket mode
     bridgeActive = false
 
     -- Update server with stream stop
