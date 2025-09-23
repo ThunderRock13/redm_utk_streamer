@@ -554,6 +554,24 @@ async function setupDirectPeerConnection(config) {
 
             console.log('Direct peer connection ready - offer available');
             console.log('SDP Offer:', offer.sdp.substring(0, 100) + '...');
+
+            // Make connection function globally available
+            window.connectDirectStream = function() {
+                console.log('=== DIRECT STREAM CONNECTION INFO ===');
+                console.log('Stream ID:', config.streamId || config.streamKey);
+                console.log('Stream Key:', config.streamKey);
+                console.log('SDP Offer:', offer.sdp);
+                console.log('=== TO CONNECT FROM MONITOR ===');
+                console.log('1. Open monitor in browser console');
+                console.log('2. Run: window.connectToDirectStream("' + config.streamKey + '", `' + offer.sdp + '`)');
+                return {
+                    streamKey: config.streamKey,
+                    offer: offer.sdp,
+                    peerConnection: pc
+                };
+            };
+
+            console.log('🎯 Call window.connectDirectStream() for connection details');
         }
     } catch (error) {
         console.error('Direct peer connection setup failed:', error);

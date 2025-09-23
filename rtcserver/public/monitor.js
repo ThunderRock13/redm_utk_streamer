@@ -1691,4 +1691,58 @@ function detectWebRTCFailure(streamKey, panelId) {
     }, 10000);
 }
 
+// Direct connection function for HTTPS mixed content workaround
+window.connectToDirectStream = async function(streamKey, sdpOffer) {
+    console.log('🔗 Attempting direct connection to stream:', streamKey);
+
+    try {
+        // Find panel with this stream key
+        let targetPanel = null;
+        for (let i = 0; i < 4; i++) {
+            const panelData = panelStreams[i];
+            if (panelData && panelData.streamKey === streamKey) {
+                targetPanel = i;
+                break;
+            }
+        }
+
+        if (targetPanel === null) {
+            console.log('❌ Stream not found in any panel. Stream key:', streamKey);
+            return false;
+        }
+
+        console.log('✅ Found stream in panel', targetPanel);
+
+        // Get the peer connection for this panel
+        const pc = peerConnections[targetPanel];
+        if (!pc) {
+            console.log('❌ No peer connection found for panel', targetPanel);
+            return false;
+        }
+
+        // Set remote description (the offer from the game)
+        await pc.setRemoteDescription(new RTCSessionDescription({
+            type: 'offer',
+            sdp: sdpOffer
+        }));
+        console.log('✅ Set remote description');
+
+        // Create answer
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log('✅ Created answer');
+
+        console.log('=== ANSWER SDP (copy this to game console) ===');
+        console.log(answer.sdp);
+        console.log('=== Run in game console ===');
+        console.log('window.directPeerConnection.setRemoteDescription(new RTCSessionDescription({type: "answer", sdp: `' + answer.sdp + '`}))');
+
+        return true;
+    } catch (error) {
+        console.error('❌ Direct connection failed:', error);
+        return false;
+    }
+};
+
 console.log('🔧 Complete monitor loaded. Available debug functions:', Object.keys(window.monitorDebug));
+console.log('🎯 Direct connection: window.connectToDirectStream(streamKey, sdpOffer)');
