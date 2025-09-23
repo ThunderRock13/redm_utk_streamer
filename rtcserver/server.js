@@ -997,9 +997,11 @@ function handleViewerRegistration(clientId, ws, data) {
         return;
     }
 
-    // Update connection
+    // Update connection (preserve monitor role if already set)
     const connection = connections.get(clientId);
-    connection.role = 'viewer';
+    if (connection.role !== 'monitor') {
+        connection.role = 'viewer';
+    }
     connection.streamKey = streamKey;
 
     // Store panel ID properly (handle panelId: 0 correctly)
