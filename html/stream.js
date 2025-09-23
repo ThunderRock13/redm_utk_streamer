@@ -365,18 +365,13 @@ function connectToSignalingServer(config) {
     let wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
     const streamKey = config.streamKey || config.streamId;
 
-    // Fix mixed content issue: if page is HTTPS but WebSocket is ws://, convert to wss://
-    if (window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
-        wsUrl = wsUrl.replace('ws://', 'wss://');
-        console.log('Converted WebSocket URL for HTTPS context:', wsUrl);
-    }
-
-    console.log('Connecting to WebSocket:', wsUrl);
+    console.log('Attempting to connect to WebSocket:', wsUrl);
 
     if (ws) {
         ws.close();
     }
 
+    // Try connecting with the provided URL first
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {

@@ -43,11 +43,45 @@ CreateThread(function()
                     print("^2[RedM Streamer]^7 Connected to media server")
                     mediaServerConnected = true
                     reconnectAttempts = 0
+
+                    -- Force immediate player list update after reconnection
+                    CreateThread(function()
+                        Wait(1000) -- Wait a moment for server to be fully ready
+                        print("^2[RedM Streamer]^7 Sending player list update after reconnection")
+
+                        -- Build and send player list immediately
+                        local players = {}
+                        local playersOnline = GetPlayers()
+
+                        for i = 1, #playersOnline do
+                            local playerId = playersOnline[i]
+                            local name = GetPlayerName(playerId)
+
+                            if name then
+                                table.insert(players, {
+                                    id = playerId,
+                                    name = name,
+                                    ping = GetPlayerPing(playerId),
+                                    streaming = activeStreams[tonumber(playerId)] ~= nil
+                                })
+                            end
+                        end
+
+                        if #players > 0 then
+                            CallMediaServer("/players/update", "POST", {
+                                players = players,
+                                timestamp = os.time()
+                            })
+                        end
+                    end)
                 end
             else
                 if mediaServerConnected then
-                    print("^3[RedM Streamer]^7 Lost connection to media server")
+                    print("^3[RedM Streamer]^7 Lost connection to media server - forcing player list refresh")
                     mediaServerConnected = false
+
+                    -- Reset player list hash to force refresh when reconnected
+                    lastPlayerListHash = ""
                 end
                 reconnectAttempts = reconnectAttempts + 1
 

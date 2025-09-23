@@ -7,7 +7,7 @@ Config.Server = {
     hostname = "192.99.60.230", -- Change this to your server IP
     port = "3000",
     -- Use secure WebSocket for HTTPS contexts (RedM NUI)
-    secure_websocket = true -- Set to true for production, false for local testing
+    secure_websocket = false -- Disabled until SSL certificates are set up
 }
 
 -- Media Server Configuration

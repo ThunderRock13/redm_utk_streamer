@@ -871,6 +871,8 @@ function handleViewerRegistration(clientId, ws, data) {
 
     // Check if this is the first viewer or if there's already a primary viewer
     let sharing = streamSharing.get(streamKey);
+    const isMonitorViewer = connection.role === 'monitor';
+
     if (!sharing) {
         // This is the first viewer - make them the primary
         sharing = {
@@ -882,11 +884,18 @@ function handleViewerRegistration(clientId, ws, data) {
     } else {
         // Check if the current primary viewer is still connected
         const primaryConnection = connections.get(sharing.primaryViewer);
+        const primaryIsMonitor = primaryConnection && primaryConnection.role === 'monitor';
+
         if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
             // Primary viewer is disconnected - make this viewer the new primary
-
             sharing.primaryViewer = clientId;
             sharing.sharedViewers.clear(); // Clear any shared viewers
+        } else if (isMonitorViewer && !primaryIsMonitor) {
+            // This is a monitor viewer and current primary is not a monitor
+            // Make the monitor the primary viewer (monitors get priority)
+            console.log('Monitor viewer taking priority over regular viewer');
+            sharing.sharedViewers.add(sharing.primaryViewer); // Demote current primary to shared
+            sharing.primaryViewer = clientId;
         }
     }
 
