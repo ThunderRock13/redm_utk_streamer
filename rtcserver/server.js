@@ -1100,9 +1100,10 @@ function handleViewerRegistration(clientId, ws, data) {
 
             }
         }, 2000);
-        }
-    } else {
-        // This is a secondary viewer - but check if primary is still active
+    }
+
+    // This is a secondary viewer - but check if primary is still active
+    if (sharing.primaryViewer !== clientId) {
         const primaryConnection = connections.get(sharing.primaryViewer);
         if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
             // Primary is gone, promote this viewer to primary instead
