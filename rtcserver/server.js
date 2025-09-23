@@ -11,27 +11,11 @@ require('dotenv').config();
 
 const app = express();
 
-// Try to use HTTPS if SSL files exist, otherwise fall back to HTTP
-let server;
-try {
-    const sslOptions = {
-        key: fs.readFileSync(path.join(__dirname, 'ssl', 'key.pem')),
-        cert: fs.readFileSync(path.join(__dirname, 'ssl', 'cert.pem'))
-    };
-    server = https.createServer(sslOptions, app);
-    console.log('🔒 Using HTTPS server');
-} catch (error) {
-    server = http.createServer(app);
-    console.log('⚠️ SSL certificates not found, using HTTP server');
-}
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const TURN_PORT = process.env.TURN_PORT || 3478;
 const API_KEY = process.env.API_KEY || 'redm-media-server-key-2024';
 
-// Determine if we're using HTTPS
-const isHttps = server instanceof https.Server;
-const protocol = isHttps ? 'https' : 'http';
-const wsProtocol = isHttps ? 'wss' : 'ws';
 
 // Built-in TURN server configuration
 const turnServer = new turn({
@@ -126,8 +110,8 @@ app.post('/api/streams/create', authenticateAPI, (req, res) => {
     }
     
     const streamKey = uuidv4();
-    const webSocketUrl = `${wsProtocol}://localhost:${PORT}/ws`;
-    const viewerUrl = `${protocol}://localhost:${PORT}/player/viewer.html?stream=${streamKey}`;
+    const webSocketUrl = `ws://localhost:${PORT}/ws`;
+    const viewerUrl = `http://localhost:${PORT}/player/viewer.html?stream=${streamKey}`;
     
     activeStreams.set(streamId, {
         streamId,
@@ -152,7 +136,7 @@ app.post('/api/streams/create', authenticateAPI, (req, res) => {
     res.json({
         streamId,
         streamKey,
-        webrtcEndpoint: `${protocol}://localhost:${PORT}/webrtc`,
+        webrtcEndpoint: `http://localhost:${PORT}/webrtc`,
         webSocketUrl,
         viewerUrl,
         stunServer: 'stun:stun.l.google.com:19302',
@@ -519,7 +503,7 @@ app.post('/webrtc/offer', async (req, res) => {
     res.json({
         success: true,
         message: 'Connect via WebSocket to complete setup',
-        webSocketUrl: `${wsProtocol}://localhost:${PORT}/ws`
+        webSocketUrl: `ws://localhost:${PORT}/ws`
     });
     
 

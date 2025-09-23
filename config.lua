@@ -7,17 +7,17 @@ Config.Server = {
     hostname = "192.99.60.230", -- Change this to your server IP
     port = "3000",
     -- Use secure WebSocket for HTTPS contexts (RedM NUI)
-    secure_websocket = true -- Enable WSS for HTTPS NUI compatibility
+    secure_websocket = false -- Disable WSS, use HTTP with bypass
 }
 
 -- Media Server Configuration
 Config.MediaServer = {
     -- WebRTC ingest endpoint
-    webrtc_url = string.format("https://%s:%s/webrtc", Config.Server.hostname, Config.Server.port),
+    webrtc_url = string.format("http://%s:%s/webrtc", Config.Server.hostname, Config.Server.port),
     -- HLS output endpoint
-    hls_url = string.format("https://%s:%s/hls", Config.Server.hostname, Config.Server.port),
+    hls_url = string.format("http://%s:%s/hls", Config.Server.hostname, Config.Server.port),
     -- API endpoint
-    api_url = string.format("https://%s:%s/api", Config.Server.hostname, Config.Server.port),
+    api_url = string.format("http://%s:%s/api", Config.Server.hostname, Config.Server.port),
     api_key = "redm-media-server-key-2024"
 }
 
