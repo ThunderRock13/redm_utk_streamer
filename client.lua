@@ -26,7 +26,7 @@ AddEventHandler('redm_streamer:startStream', function(config)
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        webSocketUrl = string.format('ws://%s:%s/ws', Config.Server.hostname, Config.Server.port),
+        webSocketUrl = string.format('%s://%s:%s/ws', Config.Server.secure_websocket and 'wss' or 'ws', Config.Server.hostname, Config.Server.port),
         stunServer = config.stunServer or 'stun:stun.l.google.com:19302',
         turnServer = config.turnServer,
         quality = Config.StreamQuality
@@ -143,6 +143,34 @@ RegisterNUICallback('streamStats', function(data, cb)
 end)
 
 RegisterNUICallback('debugLog', function(data, cb)
+    cb('ok')
+end)
+
+-- WebSocket proxy for HTTPS mixed content workaround
+RegisterNUICallback('websocket-proxy-request', function(data, cb)
+    print(string.format("^3[WebSocket Proxy]^7 Received request: %s", data.action))
+
+    if data.action == 'register-streamer' and data.streamKey then
+        -- Make HTTP call to media server to register streamer
+        local serverUrl = string.format("http://%s:%s", Config.Server.hostname, Config.Server.port)
+
+        -- Notify that the stream is ready via the bridge endpoint
+        CallMediaServer("/bridge/register", "POST", {
+            streamKey = data.streamKey,
+            playerId = GetPlayerServerId(PlayerId()),
+            playerName = GetPlayerName(PlayerId())
+        })
+
+        -- Send response back to NUI
+        SendNUIMessage({
+            type = 'websocket-proxy-response',
+            success = true,
+            streamKey = data.streamKey
+        })
+
+        print(string.format("^2[WebSocket Proxy]^7 Stream registered via HTTP bridge: %s", data.streamKey))
+    end
+
     cb('ok')
 end)
 

@@ -377,20 +377,19 @@ function connectToSignalingServer(config) {
     let wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
     const streamKey = config.streamKey || config.streamId;
 
+    // If we're in HTTPS context, try to upgrade WebSocket to WSS first
+    if (window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
+        wsUrl = wsUrl.replace('ws://', 'wss://');
+        console.log('HTTPS context detected, attempting WSS connection:', wsUrl);
+    }
+
     console.log('Attempting to connect to WebSocket:', wsUrl);
 
     if (ws) {
         ws.close();
     }
 
-    // Check if we're in HTTPS context and trying to use insecure WebSocket
-    if (window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
-        console.log('HTTPS mixed content detected, using HTTP polling fallback');
-        useHttpPollingFallback(config);
-        return;
-    }
-
-    // Try connecting with the provided URL first
+    // Try WebSocket connection
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
@@ -502,36 +501,36 @@ function connectToSignalingServer(config) {
 
 // Simple HTTP fallback for HTTPS mixed content issues
 function useHttpPollingFallback(config) {
-    console.log('WebSocket blocked by mixed content, using simple HTTP notification');
+    console.log('WebSocket blocked by mixed content, using game client proxy');
 
     const streamKey = config.streamKey || config.streamId;
-    const serverUrl = config.webSocketUrl.replace('ws://', 'http://').replace('wss://', 'https://').replace('/ws', '');
 
-    // Just notify that we're ready - the monitor will detect the stream via player list
-    fetch(`${serverUrl}/api/streams/notify-ready`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': 'redm-media-server-key-2024'
-        },
-        body: JSON.stringify({
-            streamKey: streamKey,
-            message: 'Stream ready but WebSocket blocked by mixed content'
-        })
-    })
-    .then(response => {
-        if (response.ok) {
-            console.log('Stream readiness notification sent');
+    // Use the existing bridge system for HTTPS mixed content workaround
+    console.log('Using bridge system for WebSocket communication');
+
+    // Call the existing bridgeRegister function via NUI callback
+    if (typeof fetch === 'function') {
+        fetch(`https://${GetParentResourceName()}/bridgeRegister`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                streamKey: streamKey,
+                playerId: 'current',
+                playerName: 'current'
+            })
+        }).then(response => {
+            console.log('Bridge registration initiated');
             notifyStreamStarted();
-        } else {
-            console.log('Notification failed, but stream is still running');
-            notifyStreamStarted(); // Still notify success since video is working
-        }
-    })
-    .catch(error => {
-        console.log('Notification failed, but stream is still running:', error.message);
+        }).catch(error => {
+            console.log('Bridge registration failed, but stream is working:', error.message);
+            notifyStreamStarted();
+        });
+    } else {
+        console.log('Fetch not available, stream running without WebSocket communication');
         notifyStreamStarted(); // Still notify success since video is working
-    });
+    }
 }
 
 function startHeartbeat() {
@@ -954,6 +953,10 @@ function sendWebSocketMessage(message) {
     } else if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(message));
     }
+}
+
+function GetParentResourceName() {
+    return 'redm_streamer';
 }
 
 // Stream script loaded
