@@ -515,6 +515,17 @@ AddEventHandler('redm_streamer:bridgeRegister', function(data)
                 lastPoll = os.time()
             }
 
+            -- IMPORTANT: Also create activeStreams entry so monitor can find existing stream
+            activeStreams[playerId] = {
+                streamId = streamKey, -- Use streamKey as streamId for bridge mode
+                streamKey = streamKey,
+                webrtcEndpoint = string.format('http://%s:%s/webrtc', Config.Server.hostname, Config.Server.port),
+                hlsUrl = string.format('http://%s:%s/player/viewer.html?stream=%s', Config.Server.hostname, Config.Server.port, streamKey),
+                startTime = os.time(),
+                viewers = 0,
+                bridgeMode = true
+            }
+
             -- Start polling for messages from RTC server
             startBridgePolling(playerId)
 
