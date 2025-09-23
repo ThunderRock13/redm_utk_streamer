@@ -35,12 +35,18 @@ app.use(cors());
 app.use(express.json());
 app.use('/player', express.static(path.join(__dirname, 'public')));
 
-// Serve monitor page specifically
+// Root route redirects to monitor
+app.get('/', (req, res) => {
+    res.redirect('/monitor');
+});
+
+// Serve monitor page specifically (BEFORE static middleware)
 app.get('/monitor', (req, res) => {
+    console.log('Monitor page requested');
     res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
 });
 
-// Serve static files for monitor assets
+// Serve static files for monitor assets (js, css, etc.)
 app.use('/monitor', express.static(path.join(__dirname, 'public')));
 
 // WebSocket server for WebRTC signaling

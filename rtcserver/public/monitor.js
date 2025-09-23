@@ -259,7 +259,8 @@ function connectWebSocket() {
     };
 
     ws.onerror = (error) => {
-        console.log('❌ WebSocket error');
+        console.log('❌ WebSocket error connecting to:', WS_URL);
+        console.log('❌ Error details:', error);
         updateConnectionStatus('Connection Error');
     };
 
@@ -310,47 +311,8 @@ function handleStreamAssigned(data) {
         return;
     }
 
-    // Panel 0 workaround: simulate panel transfer to ensure WebRTC setup works
-    if (!existing && panelId === 0) {
-        console.log('🔄 Panel 0 workaround: Simulating panel transfer to ensure WebRTC works');
-
-        // Set up the stream in Panel 0 normally first
-        setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
-
-        // After 5 seconds, simulate moving the stream to trigger proper WebRTC setup
-        setTimeout(() => {
-            console.log('🔄 Panel 0 workaround: Triggering mock transfer to refresh WebRTC');
-
-            // Find the active stream
-            const stream = activeStreams.get(playerId);
-            if (stream && stream.panelId === 0) {
-                // Mark as moving to prevent full cleanup
-                stream.isMoving = true;
-
-                // Stop current setup but keep it marked as moving
-                stopStreamInPanel(0);
-
-                // Wait a moment, then re-request the same stream for Panel 0
-                setTimeout(() => {
-                    console.log('🔄 Panel 0 workaround: Re-requesting stream for Panel 0');
-
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: 'monitor-request-stream',
-                            apiKey: API_KEY,
-                            playerId: playerId,
-                            panelId: 0,
-                            playerName: playerName
-                        }));
-                    }
-                }, 1000);
-            }
-        }, 5000); // Wait 5 seconds for initial setup to complete
-
-        return; // Exit early for Panel 0 workaround
-    }
-
-    // Normal setup for other panels or existing streams
+    // Temporarily disable Panel 0 workaround for debugging
+    // Normal setup for all panels
     setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
 }
 

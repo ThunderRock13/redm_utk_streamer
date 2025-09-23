@@ -251,10 +251,10 @@ class CfxGameViewRenderer {
 }
 
 async function startStream(config) {
-    // Starting stream
+    console.log('Starting stream:', config.streamId);
 
     if (isStreaming) {
-        // Already streaming, stopping first
+        console.log('Already streaming, stopping first');
         stopStream();
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -274,10 +274,14 @@ async function startStream(config) {
         if (!canvas) {
             throw new Error('Canvas element not found');
         }
-        
+
+        console.log('Canvas found:', canvas.width, 'x', canvas.height);
+
         let MainRender = new CfxGameViewRenderer(canvas);
+        console.log('CfxGameViewRenderer initialized');
 
         // Wait for rendering to stabilize
+        console.log('Waiting for rendering to stabilize...');
         await new Promise(resolve => setTimeout(resolve, 2000));
         
         // Try different capture methods
@@ -297,8 +301,15 @@ async function startStream(config) {
         // Verify stream has tracks
         const videoTracks = localStream.getVideoTracks();
         const audioTracks = localStream.getAudioTracks();
-        
-        // Stream tracks checked
+
+        console.log(`Stream tracks - Video: ${videoTracks.length}, Audio: ${audioTracks.length}`);
+        if (videoTracks.length > 0) {
+            console.log('Video track details:', {
+                enabled: videoTracks[0].enabled,
+                readyState: videoTracks[0].readyState,
+                settings: videoTracks[0].getSettings()
+            });
+        }
         
         if (videoTracks.length === 0) {
             // Try to create a test pattern if no video
@@ -363,34 +374,34 @@ function connectToSignalingServer(config) {
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-        // WebSocket connected
+        console.log('WebSocket connected');
         clearReconnectTimer();
-        
+
         // Register as streamer with validation
         const streamKey = config.streamKey || config.streamId;
-        // Registering with stream key
+        console.log('Registering with stream key:', streamKey);
 
         ws.send(JSON.stringify({
             type: 'register-streamer',
             streamKey: streamKey
         }));
-        
+
         // Start heartbeat
         startHeartbeat();
     };
     
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        // WebSocket message received
+        console.log('WebSocket message received:', data.type);
 
         switch(data.type) {
             case 'registered':
-                // Registered as streamer
+                console.log('Registered as streamer');
                 notifyStreamStarted();
                 break;
 
             case 'viewer-joined':
-                // Viewer joined
+                console.log('Viewer joined message received:', data);
                 await handleViewerJoined(data.viewerId);
                 updateDebug('viewerCount', viewers.size);
                 break;
@@ -518,7 +529,9 @@ function clearReconnectTimer() {
 }
 
 async function handleViewerJoined(viewerId) {
-    // Viewer joined
+    console.log('Viewer joined:', viewerId);
+    console.log('Local stream available:', !!localStream);
+    console.log('Local stream tracks:', localStream ? localStream.getTracks().length : 0);
 
     const configuration = {
         iceServers: webrtcConfig ? webrtcConfig.iceServers : [
@@ -534,12 +547,12 @@ async function handleViewerJoined(viewerId) {
     if (localStream) {
         const tracks = localStream.getTracks();
         tracks.forEach(track => {
-            // Adding track to peer connection
+            console.log('Adding track to peer connection:', track.kind, track.enabled);
             viewerPc.addTrack(track, localStream);
         });
-        // Added tracks to peer connection
+        console.log('Added', tracks.length, 'tracks to peer connection');
     } else {
-        // ERROR: No local stream available
+        console.log('ERROR: No local stream available for viewer connection');
     }
     
     // ICE candidates

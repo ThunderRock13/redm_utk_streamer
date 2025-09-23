@@ -127,12 +127,12 @@ function HandleStreamRequest(request)
         panelId = panelId
     }
     
-    -- Tell player to start streaming
+    -- Tell player to start streaming (use config server URL)
     TriggerClientEvent('redm_streamer:startStream', playerId, {
         streamId = streamId,
         streamKey = streamKey,
-        webrtcUrl = 'http://localhost:3000/webrtc',
-        webSocketUrl = 'ws://localhost:3000/ws',
+        webrtcUrl = string.format('http://%s:%s/webrtc', Config.Server.hostname, Config.Server.port),
+        webSocketUrl = string.format('ws://%s:%s/ws', Config.Server.hostname, Config.Server.port),
         stunServer = 'stun:stun.l.google.com:19302'
     })
     
