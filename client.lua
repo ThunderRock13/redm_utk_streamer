@@ -151,13 +151,17 @@ end)
 
 -- Bridge mode NUI callbacks
 RegisterNUICallback('bridgeRegister', function(data, cb)
+    print("^2[Bridge]^7 NUI bridge registration called with stream key: " .. (data.streamKey or "nil"))
     if bridgeActive and streamConfig then
+        print("^2[Bridge]^7 Sending bridge registration to server")
         -- Tell server to register with RTC server
         TriggerServerEvent('redm_streamer:bridgeRegister', {
             streamKey = data.streamKey,
             playerId = GetPlayerServerId(PlayerId()),
             playerName = GetPlayerName(PlayerId())
         })
+    else
+        print("^1[Bridge]^7 Bridge not active or no stream config")
     end
     cb('ok')
 end)
