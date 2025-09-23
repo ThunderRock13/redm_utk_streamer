@@ -1020,12 +1020,18 @@ function handleViewerRegistration(clientId, ws, data) {
     // Cancel auto-stop if viewer joined
     cancelAutoStop(stream);
 
+    // Clean up any dead sharing entries first
+    cleanupDeadSharingEntries(streamKey);
+
     // Check if this is the first viewer or if there's already a primary viewer
     let sharing = streamSharing.get(streamKey);
     const isMonitorViewer = connection.role === 'monitor';
 
+    console.log(`[DEBUG] Viewer registration - ClientID: ${clientId}, Role: ${connection.role}, IsMonitor: ${isMonitorViewer}`);
+
     if (!sharing) {
         // This is the first viewer - make them the primary
+        console.log(`[DEBUG] No existing sharing - making first viewer primary`);
         sharing = {
             primaryViewer: clientId,
             sharedViewers: new Set(),
@@ -1037,20 +1043,25 @@ function handleViewerRegistration(clientId, ws, data) {
         const primaryConnection = connections.get(sharing.primaryViewer);
         const primaryIsMonitor = primaryConnection && primaryConnection.role === 'monitor';
 
+        console.log(`[DEBUG] Existing primary - ID: ${sharing.primaryViewer}, Role: ${primaryConnection?.role}, IsMonitor: ${primaryIsMonitor}, Connected: ${primaryConnection?.ws?.readyState === WebSocket.OPEN}`);
+
         if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
             // Primary viewer is disconnected - make this viewer the new primary
+            console.log(`[DEBUG] Primary disconnected - promoting current viewer to primary`);
             sharing.primaryViewer = clientId;
             sharing.sharedViewers.clear(); // Clear any shared viewers
         } else if (isMonitorViewer && !primaryIsMonitor) {
             // This is a monitor viewer and current primary is not a monitor
             // Make the monitor the primary viewer (monitors get priority)
-            console.log('Monitor viewer taking priority over regular viewer');
+            console.log('[DEBUG] Monitor viewer taking priority over regular viewer');
             sharing.sharedViewers.add(sharing.primaryViewer); // Demote current primary to shared
             sharing.primaryViewer = clientId;
         }
     }
 
     // Determine if this viewer should be primary or shared
+    console.log(`[DEBUG] Final decision - Current primary: ${sharing.primaryViewer}, Current viewer: ${clientId}, Will be primary: ${sharing.primaryViewer === clientId}`);
+
     if (sharing.primaryViewer === clientId) {
 
 
@@ -1715,6 +1726,29 @@ process.on('SIGINT', () => {
         });
     });
 });
+
+// Cleanup function for dead sharing entries
+function cleanupDeadSharingEntries(streamKey) {
+    const sharing = streamSharing.get(streamKey);
+    if (!sharing) return;
+
+    // Check if primary viewer is still connected
+    const primaryConnection = connections.get(sharing.primaryViewer);
+    if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
+        console.log(`[DEBUG] Cleaning up dead primary viewer: ${sharing.primaryViewer}`);
+        streamSharing.delete(streamKey);
+        return;
+    }
+
+    // Clean up dead shared viewers
+    for (const viewerId of sharing.sharedViewers) {
+        const connection = connections.get(viewerId);
+        if (!connection || connection.ws.readyState !== WebSocket.OPEN) {
+            console.log(`[DEBUG] Removing dead shared viewer: ${viewerId}`);
+            sharing.sharedViewers.delete(viewerId);
+        }
+    }
+}
 
 // Keep alive
 setInterval(() => {
