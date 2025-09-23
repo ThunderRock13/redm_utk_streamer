@@ -500,7 +500,7 @@ AddEventHandler('redm_streamer:bridgeRegister', function(data)
     print(string.format("^2[Bridge]^7 Registering bridge for player %d with stream key %s", playerId, streamKey))
 
     -- Register with RTC server
-    CallMediaServer('/api/bridge/register', 'POST', {
+    CallMediaServer('/bridge/register', 'POST', {
         streamKey = streamKey,
         playerId = playerId,
         playerName = playerName
@@ -549,7 +549,7 @@ AddEventHandler('redm_streamer:bridgeMessage', function(data)
     print(string.format("^2[Bridge]^7 Forwarding message from player %d: %s", playerId, message.type))
 
     -- Forward message to RTC server
-    CallMediaServer('/api/bridge/send', 'POST', {
+    CallMediaServer('/bridge/send', 'POST', {
         streamKey = streamKey,
         playerId = playerId,
         message = message
@@ -578,7 +578,7 @@ function startBridgePolling(playerId)
             end
 
             -- Poll RTC server for messages
-            CallMediaServer('/api/bridge/poll', 'POST', {
+            CallMediaServer('/bridge/poll', 'POST', {
                 streamKey = currentBridge.streamKey,
                 playerId = playerId
             }, function(success, response)
@@ -610,7 +610,7 @@ function cleanupBridge(playerId)
         print(string.format("^3[Bridge]^7 Cleaning up bridge for player %d", playerId))
 
         -- Notify RTC server of cleanup
-        CallMediaServer('/api/bridge/cleanup', 'POST', {
+        CallMediaServer('/bridge/cleanup', 'POST', {
             streamKey = bridge.streamKey,
             playerId = playerId,
             reason = 'player_disconnected'
