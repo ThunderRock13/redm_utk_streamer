@@ -508,9 +508,10 @@ function useHttpPollingFallback(config) {
     streamConfig = config;
     streamConfig.directMode = true;
 
-    // Video streaming works without WebSocket signaling
-    // The stream will be available but monitor won't auto-connect
-    console.log('Stream active in direct mode - monitor needs manual connection');
+    // Try to establish direct peer connection after stream is ready
+    setTimeout(() => {
+        setupDirectPeerConnection(config);
+    }, 1000);
 
     // Start heartbeat simulation
     if (!heartbeatTimer) {
@@ -520,6 +521,43 @@ function useHttpPollingFallback(config) {
     }
 
     notifyStreamStarted();
+}
+
+// Setup peer connection directly without WebSocket signaling
+async function setupDirectPeerConnection(config) {
+    console.log('Setting up direct peer connection');
+
+    try {
+        // Create peer connection
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:192.99.60.230:3478' }
+            ]
+        });
+
+        // Add video track to peer connection
+        if (localStream && localStream.getVideoTracks().length > 0) {
+            localStream.getVideoTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+                console.log('Added video track to peer connection');
+            });
+
+            // Create offer and set as local description
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            console.log('Created SDP offer for direct connection');
+
+            // Store the peer connection for potential manual connection
+            window.directPeerConnection = pc;
+            window.directOffer = offer;
+
+            console.log('Direct peer connection ready - offer available');
+            console.log('SDP Offer:', offer.sdp.substring(0, 100) + '...');
+        }
+    } catch (error) {
+        console.error('Direct peer connection setup failed:', error);
+    }
 }
 
 function startHeartbeat() {
