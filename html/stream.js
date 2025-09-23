@@ -362,15 +362,21 @@ function createTestPattern(canvas) {
 }
 
 function connectToSignalingServer(config) {
-    const wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
+    let wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
     const streamKey = config.streamKey || config.streamId;
-    
-    // Connecting to WebSocket
-    
+
+    // Fix mixed content issue: if page is HTTPS but WebSocket is ws://, convert to wss://
+    if (window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
+        wsUrl = wsUrl.replace('ws://', 'wss://');
+        console.log('Converted WebSocket URL for HTTPS context:', wsUrl);
+    }
+
+    console.log('Connecting to WebSocket:', wsUrl);
+
     if (ws) {
         ws.close();
     }
-    
+
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {

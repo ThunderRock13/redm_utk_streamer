@@ -5,7 +5,9 @@ Config.Server = {
     -- Set this to your server's external IP for remote access
     -- Use "localhost" for local testing only
     hostname = "192.99.60.230", -- Change this to your server IP
-    port = "3000"
+    port = "3000",
+    -- Use secure WebSocket for HTTPS contexts (RedM NUI)
+    secure_websocket = true -- Set to true for production, false for local testing
 }
 
 -- Media Server Configuration
