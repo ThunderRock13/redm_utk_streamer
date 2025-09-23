@@ -28,4 +28,4 @@ Config.StreamQuality = {
 }
 
 -- Debug
-Config.Debug = false
+Config.Debug = true -- Temporarily enabled for troubleshooting

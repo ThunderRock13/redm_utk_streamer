@@ -49,6 +49,9 @@ app.get('/monitor', (req, res) => {
 // Serve static files for monitor assets (js, css, etc.)
 app.use('/monitor', express.static(path.join(__dirname, 'public')));
 
+// Also serve static files directly from root for assets
+app.use(express.static(path.join(__dirname, 'public')));
+
 // WebSocket server for WebRTC signaling
 const wss = new WebSocket.Server({ 
     server,

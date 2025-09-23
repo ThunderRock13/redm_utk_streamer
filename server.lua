@@ -9,6 +9,11 @@ local function CallMediaServer(endpoint, method, data, callback)
         ["Content-Type"] = "application/json",
         ["X-API-Key"] = Config.MediaServer.api_key
     }
+
+    -- Debug: Print the URL being called
+    if Config.Debug then
+        print("^3[DEBUG]^7 CallMediaServer URL: " .. url)
+    end
     
     PerformHttpRequest(url, function(statusCode, response, headers)
         if Config.Debug then
