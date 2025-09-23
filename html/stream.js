@@ -499,31 +499,17 @@ function connectToSignalingServer(config) {
     };
 }
 
-// Simple HTTP fallback for HTTPS mixed content issues
+// Simple fallback for HTTPS mixed content issues
 function useHttpPollingFallback(config) {
-    console.log('WebSocket blocked by mixed content, using HTTP proxy');
+    console.log('WebSocket blocked by mixed content - running in offline mode');
 
-    const streamKey = config.streamKey || config.streamId;
+    // Video capture and streaming works fine without WebSocket
+    // The monitor will need to detect the stream through other means
+    console.log('Stream is running but WebSocket signaling unavailable');
+    console.log('Video tracks are active - stream should work for local recording');
 
-    // Use HTTP proxy via game client to notify stream is ready
-    fetch(`https://${GetParentResourceName()}/http-proxy-request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            endpoint: '/streams/notify-ready',
-            method: 'POST',
-            body: {
-                streamKey: streamKey,
-                message: 'Stream ready via HTTP proxy'
-            }
-        })
-    }).then(() => {
-        console.log('HTTP proxy notification sent');
-        notifyStreamStarted();
-    }).catch(error => {
-        console.log('HTTP proxy failed, but stream is working:', error.message);
-        notifyStreamStarted();
-    });
+    // Just notify that streaming started
+    notifyStreamStarted();
 }
 
 function startHeartbeat() {
