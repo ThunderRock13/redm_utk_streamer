@@ -372,6 +372,10 @@ app.post('/api/bridge/poll', authenticateAPI, (req, res) => {
     // Get pending messages
     const messages = bridge.messageQueue.splice(0); // Get all messages and clear queue
 
+    if (messages.length > 0) {
+        console.log(`[BRIDGE] Sending ${messages.length} messages to client for ${streamKey}:`, messages.map(m => m.type));
+    }
+
     res.json({ messages });
 });
 
@@ -444,7 +448,10 @@ function forwardToViewers(streamKey, message) {
 function sendToBridge(streamKey, message) {
     const bridge = bridgeConnections.get(streamKey);
     if (bridge) {
+        console.log(`[BRIDGE] Sending message to bridge for ${streamKey}: ${message.type}`);
         bridge.messageQueue.push(message);
+    } else {
+        console.log(`[BRIDGE] No bridge found for ${streamKey} - message ${message.type} not sent`);
     }
 }
 
@@ -1092,6 +1099,7 @@ function handleViewerRegistration(clientId, ws, data) {
         // Also send to bridge if registered
         sendToBridge(streamKey, viewerMessage);
 
+        return; // Exit here for primary viewers
 
     } else {
 

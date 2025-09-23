@@ -572,9 +572,13 @@ function startBridgePolling(playerId)
                 playerId = playerId
             }, function(success, response)
                 if success and response and response.messages then
+                    if #response.messages > 0 then
+                        print(string.format("^2[Bridge]^7 Received %d messages for player %d", #response.messages, playerId))
+                    end
                     -- Forward messages to client
                     for _, message in ipairs(response.messages) do
                         if GetPlayerName(playerId) then -- Check if player still connected
+                            print(string.format("^2[Bridge]^7 Forwarding message to client %d: %s", playerId, message.type))
                             TriggerClientEvent('redm_streamer:bridgeMessage', playerId, message)
                         else
                             -- Player disconnected, clean up bridge
