@@ -259,7 +259,8 @@ function connectWebSocket() {
     };
 
     ws.onerror = (error) => {
-        console.log('❌ WebSocket error');
+        console.log('❌ WebSocket error connecting to:', WS_URL);
+        console.log('❌ Error details:', error);
         updateConnectionStatus('Connection Error');
     };
 
@@ -310,47 +311,8 @@ function handleStreamAssigned(data) {
         return;
     }
 
-    // Panel 0 workaround: simulate panel transfer to ensure WebRTC setup works
-    if (!existing && panelId === 0) {
-        console.log('🔄 Panel 0 workaround: Simulating panel transfer to ensure WebRTC works');
-
-        // Set up the stream in Panel 0 normally first
-        setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
-
-        // After 5 seconds, simulate moving the stream to trigger proper WebRTC setup
-        setTimeout(() => {
-            console.log('🔄 Panel 0 workaround: Triggering mock transfer to refresh WebRTC');
-
-            // Find the active stream
-            const stream = activeStreams.get(playerId);
-            if (stream && stream.panelId === 0) {
-                // Mark as moving to prevent full cleanup
-                stream.isMoving = true;
-
-                // Stop current setup but keep it marked as moving
-                stopStreamInPanel(0);
-
-                // Wait a moment, then re-request the same stream for Panel 0
-                setTimeout(() => {
-                    console.log('🔄 Panel 0 workaround: Re-requesting stream for Panel 0');
-
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: 'monitor-request-stream',
-                            apiKey: API_KEY,
-                            playerId: playerId,
-                            panelId: 0,
-                            playerName: playerName
-                        }));
-                    }
-                }, 1000);
-            }
-        }, 5000); // Wait 5 seconds for initial setup to complete
-
-        return; // Exit early for Panel 0 workaround
-    }
-
-    // Normal setup for other panels or existing streams
+    // Temporarily disable Panel 0 workaround for debugging
+    // Normal setup for all panels
     setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, panel);
 }
 
@@ -1712,4 +1674,58 @@ function detectWebRTCFailure(streamKey, panelId) {
     }, 10000);
 }
 
+// Direct connection function for HTTPS mixed content workaround
+window.connectToDirectStream = async function(streamKey, sdpOffer) {
+    console.log('🔗 Attempting direct connection to stream:', streamKey);
+
+    try {
+        // Find panel with this stream key
+        let targetPanel = null;
+        for (let i = 0; i < 4; i++) {
+            const panelData = panelStreams[i];
+            if (panelData && panelData.streamKey === streamKey) {
+                targetPanel = i;
+                break;
+            }
+        }
+
+        if (targetPanel === null) {
+            console.log('❌ Stream not found in any panel. Stream key:', streamKey);
+            return false;
+        }
+
+        console.log('✅ Found stream in panel', targetPanel);
+
+        // Get the peer connection for this panel
+        const pc = peerConnections[targetPanel];
+        if (!pc) {
+            console.log('❌ No peer connection found for panel', targetPanel);
+            return false;
+        }
+
+        // Set remote description (the offer from the game)
+        await pc.setRemoteDescription(new RTCSessionDescription({
+            type: 'offer',
+            sdp: sdpOffer
+        }));
+        console.log('✅ Set remote description');
+
+        // Create answer
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        console.log('✅ Created answer');
+
+        console.log('=== ANSWER SDP (copy this to game console) ===');
+        console.log(answer.sdp);
+        console.log('=== Run in game console ===');
+        console.log('window.directPeerConnection.setRemoteDescription(new RTCSessionDescription({type: "answer", sdp: `' + answer.sdp + '`}))');
+
+        return true;
+    } catch (error) {
+        console.error('❌ Direct connection failed:', error);
+        return false;
+    }
+};
+
 console.log('🔧 Complete monitor loaded. Available debug functions:', Object.keys(window.monitorDebug));
+console.log('🎯 Direct connection: window.connectToDirectStream(streamKey, sdpOffer)');
