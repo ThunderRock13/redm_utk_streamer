@@ -8,7 +8,11 @@
       "Bash(powershell:*)",
       "Bash(curl:*)",
       "Bash(nslookup:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npm start)",
+      "Bash(netstat:*)",
+      "Bash(tasklist)",
+      "Bash(tasklist:*)"
     ],
     "deny": [],
     "ask": []

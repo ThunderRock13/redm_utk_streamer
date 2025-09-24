@@ -35,13 +35,13 @@ app.use(cors());
 app.use(express.json());
 app.use('/player', express.static(path.join(__dirname, 'public')));
 
-// Serve monitor page specifically
+// Serve static files for monitor assets first
+app.use('/assets', express.static(path.join(__dirname, 'public')));
+
+// Serve monitor page
 app.get('/monitor', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
 });
-
-// Serve static files for monitor assets
-app.use('/monitor', express.static(path.join(__dirname, 'public')));
 
 // WebSocket server for WebRTC signaling
 const wss = new WebSocket.Server({ 
@@ -195,6 +195,8 @@ app.get('/api/streams', authenticateAPI, (req, res) => {
 // Update player list
 app.post('/api/players/update', authenticateAPI, (req, res) => {
     playerList = req.body.players || [];
+
+    console.log(`[API] Player list updated: ${playerList.length} players`);
 
     // Broadcast to all monitor connections
     broadcastToMonitors({
@@ -372,11 +374,14 @@ function stopStream(streamId) {
 
 // Helper function to broadcast to all monitors
 function broadcastToMonitors(message) {
+    let monitorCount = 0;
     connections.forEach((conn, clientId) => {
         if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
             conn.ws.send(JSON.stringify(message));
+            monitorCount++;
         }
     });
+    console.log(`[Broadcast] Sent ${message.type} to ${monitorCount} monitors`);
 }
 
 // WebSocket handling
@@ -501,18 +506,21 @@ function handleMonitorRegistration(clientId, ws, data) {
     const connection = connections.get(clientId);
     connection.role = 'monitor';
     monitorConnections.add(clientId);
-    
+
+    console.log(`[Monitor] Monitor registered: ${clientId}`);
+
     ws.send(JSON.stringify({
-        type: 'registered', 
+        type: 'registered',
         role: 'monitor'
     }));
-    
+
     // Send current player list
+    console.log(`[Monitor] Sending ${playerList.length} players to monitor`);
     ws.send(JSON.stringify({
-        type: 'player-update', 
+        type: 'player-update',
         players: playerList
     }));
-    
+
     // Send current active streams
     const streams = Array.from(activeStreams.values()).map(stream => ({
         streamId: stream.streamId,
@@ -522,7 +530,7 @@ function handleMonitorRegistration(clientId, ws, data) {
         viewers: stream.viewerCount || 0
     }));
     ws.send(JSON.stringify({
-        type: 'active-streams', 
+        type: 'active-streams',
         streams: streams
     }));
     

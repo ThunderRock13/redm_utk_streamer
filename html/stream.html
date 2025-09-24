@@ -7,10 +7,10 @@
     
 </head>
 <body>
-    <canvas id="stream-canvas" width="1920" height="1080" style="display: none;"></canvas>
+    <canvas id="stream-canvas" width="1920" height="1080" style="position: absolute; top: 0; left: 0; z-index: -1; visibility: hidden; pointer-events: none;"></canvas>
     
-    <!-- Debug panel -->
-    <div id="debug">
+    <!-- Debug panel (hidden during gameplay) -->
+    <div id="debug" style="display: none;">
         <div>Status: <span id="status">Idle</span></div>
         <div>Stream: <span id="streamId">-</span></div>
         <div>Viewers: <span id="viewerCount">0</span></div>

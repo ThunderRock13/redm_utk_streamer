@@ -27,6 +27,9 @@ end
 local mediaServerConnected = false
 local reconnectAttempts = 0
 local maxReconnectAttempts = -1 -- Infinite attempts
+local lastConnectionTime = 0
+local connectionLostTime = 0
+local heartbeatFailures = 0
 
 CreateThread(function()
     Wait(5000)
@@ -36,20 +39,35 @@ CreateThread(function()
             if success then
                 if not mediaServerConnected then
                     print("^2[RedM Streamer]^7 Connected to media server")
+
+                    -- If we were previously disconnected, restore player list
+                    if connectionLostTime > 0 then
+                        print("^2[RedM Streamer]^7 Reconnected! Restoring player list...")
+                        -- Force immediate player list update
+                        CreateThread(function()
+                            Wait(1000) -- Give server time to be ready
+                            ForcePlayerListUpdate()
+                        end)
+                        connectionLostTime = 0
+                    end
+
                     mediaServerConnected = true
                     reconnectAttempts = 0
+                    heartbeatFailures = 0
+                    lastConnectionTime = GetGameTimer()
                 end
             else
                 if mediaServerConnected then
-                    print("^3[RedM Streamer]^7 Lost connection to media server")
+                    print("^3[RedM Streamer]^7 Lost connection to media server - attempting reconnection")
                     mediaServerConnected = false
+                    connectionLostTime = GetGameTimer()
                 end
                 reconnectAttempts = reconnectAttempts + 1
 
                 if reconnectAttempts <= 3 then
                     print("^1[RedM Streamer]^7 Media server not available (attempt " .. reconnectAttempts .. ")")
                 elseif reconnectAttempts % 12 == 0 then -- Every minute (5s * 12 = 60s)
-                    print("^1[RedM Streamer]^7 Still trying to connect to media server...")
+                    print("^1[RedM Streamer]^7 Still trying to reconnect to media server...")
                 end
             end
         end)
@@ -68,11 +86,48 @@ CreateThread(function()
         end
     end)
 
-    -- Continuous health check and reconnection
+    -- Enhanced connection monitoring with heartbeat
     CreateThread(function()
         while true do
             Wait(5000) -- Check every 5 seconds
             attemptConnection()
+
+            -- Additional heartbeat check if connected
+            if mediaServerConnected then
+                local currentTime = GetGameTimer()
+                -- If no successful connection in last 30 seconds, force reconnection
+                if currentTime - lastConnectionTime > 30000 then
+                    heartbeatFailures = heartbeatFailures + 1
+                    if heartbeatFailures > 3 then
+                        print("^3[RedM Streamer]^7 Heartbeat failed, forcing reconnection...")
+                        mediaServerConnected = false
+                        heartbeatFailures = 0
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Connection restoration monitor
+    CreateThread(function()
+        while true do
+            Wait(10000) -- Check every 10 seconds
+
+            -- If we've been disconnected for more than 60 seconds, try full restoration
+            if connectionLostTime > 0 and (GetGameTimer() - connectionLostTime) > 60000 then
+                print("^3[RedM Streamer]^7 Attempting full connection restoration...")
+
+                -- Clear any stuck states
+                for playerId, stream in pairs(activeStreams) do
+                    print("^3[RedM Streamer]^7 Cleaning up orphaned stream for player " .. playerId)
+                    activeStreams[playerId] = nil
+                end
+
+                -- Force reconnection attempt
+                mediaServerConnected = false
+                reconnectAttempts = 0
+                connectionLostTime = 0
+            end
         end
     end)
 end)
@@ -105,7 +160,7 @@ function HandleStreamRequest(request)
         print(string.format("^3[Stream Request]^7 Player %d already streaming - cleaning up for restart", playerId))
 
         -- Stop the existing stream first
-        TriggerClientEvent('redm_streamer:stopStream', playerId)
+        TriggerClientEvent('redm_utk_streamer:stopStream', playerId)
 
         -- Clean up immediately to allow restart
         activeStreams[playerId] = nil
@@ -127,11 +182,10 @@ function HandleStreamRequest(request)
         panelId = panelId
     }
     
-    -- Tell player to start streaming
-    TriggerClientEvent('redm_streamer:startStream', playerId, {
+    -- Tell player to start streaming directly to server
+    TriggerClientEvent('redm_utk_streamer:startStream', playerId, {
         streamId = streamId,
         streamKey = streamKey,
-        webrtcUrl = 'http://localhost:3000/webrtc',
         webSocketUrl = 'ws://localhost:3000/ws',
         stunServer = 'stun:stun.l.google.com:19302'
     })
@@ -151,6 +205,42 @@ end
 -- Existing playerList tracking
 local playerList = {}
 local lastPlayerListHash = ""
+
+-- Force player list update (used for reconnection)
+function ForcePlayerListUpdate()
+    print("^2[RedM Streamer]^7 Forcing player list update...")
+
+    -- Build current player list
+    local players = {}
+    local playersOnline = GetPlayers()
+
+    for i = 1, #playersOnline do
+        local playerId = playersOnline[i]
+        local name = GetPlayerName(playerId)
+
+        if name then
+            table.insert(players, {
+                id = playerId,
+                name = name,
+                ping = GetPlayerPing(playerId),
+                streaming = activeStreams[tonumber(playerId)] ~= nil
+            })
+        end
+    end
+
+    -- Force send update regardless of hash
+    playerList = players
+    lastPlayerListHash = "" -- Reset hash to force update
+
+    CallMediaServer("/players/update", "POST", {
+        players = players,
+        timestamp = os.time()
+    }, function(success, data)
+        if Config.Debug then
+            print(string.format("^2[Force Player Update]^7 Sent %d players - Success: %s", #players, tostring(success)))
+        end
+    end)
+end
 
 CreateThread(function()
     while true do
@@ -184,13 +274,15 @@ CreateThread(function()
             playerList = players
             lastPlayerListHash = simpleHash
 
-            -- Send minimal update
-            if #players > 0 then
-                CallMediaServer("/players/update", "POST", {
-                    players = players,
-                    timestamp = os.time()
-                })
-            end
+            -- Send minimal update (always send, even if empty, to keep connection alive)
+            CallMediaServer("/players/update", "POST", {
+                players = players,
+                timestamp = os.time()
+            }, function(success, data)
+                if Config.Debug then
+                    print(string.format("^2[Player Update]^7 Sent %d players - Success: %s", #players, tostring(success)))
+                end
+            end)
         end
         
         -- Clean up dead streams
@@ -213,8 +305,8 @@ CreateThread(function()
 end)
 
 -- Handle manual stream requests (existing functionality)
-RegisterNetEvent('redm_streamer:requestStream')
-AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorId)
+RegisterNetEvent('redm_utk_streamer:requestStream')
+AddEventHandler('redm_utk_streamer:requestStream', function(targetPlayerId, monitorId)
     local source = source
     
     if source == 0 or monitorId then
@@ -223,7 +315,7 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
     
     if not GetPlayerName(targetPlayerId) then
         if source > 0 then
-            TriggerClientEvent('redm_streamer:notify', source, 'Player not found')
+            TriggerClientEvent('redm_utk_streamer:notify', source, 'Player not found')
         end
         return
     end
@@ -263,7 +355,7 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
                 monitorId = monitorId
             }
             
-            TriggerClientEvent('redm_streamer:startStream', targetPlayerId, {
+            TriggerClientEvent('redm_utk_streamer:startStream', targetPlayerId, {
                 streamId = streamId,
                 streamKey = data.streamKey,
                 webrtcUrl = data.webrtcEndpoint or 'http://localhost:3000/webrtc',
@@ -280,8 +372,8 @@ AddEventHandler('redm_streamer:requestStream', function(targetPlayerId, monitorI
 end)
 
 -- Stop stream
-RegisterNetEvent('redm_streamer:stopStream')
-AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
+RegisterNetEvent('redm_utk_streamer:stopStream')
+AddEventHandler('redm_utk_streamer:stopStream', function(targetPlayerId)
     local source = source
     local playerId = targetPlayerId or source
 
@@ -303,7 +395,7 @@ AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
         })
 
         -- Notify player with force stop
-        TriggerClientEvent('redm_streamer:stopStream', playerId)
+        TriggerClientEvent('redm_utk_streamer:stopStream', playerId)
 
         -- Wait a bit then clean up
         SetTimeout(1000, function()
@@ -315,15 +407,15 @@ AddEventHandler('redm_streamer:stopStream', function(targetPlayerId)
 end)
 
 -- Get stream stats
-RegisterNetEvent('redm_streamer:getStats')
-AddEventHandler('redm_streamer:getStats', function()
+RegisterNetEvent('redm_utk_streamer:getStats')
+AddEventHandler('redm_utk_streamer:getStats', function()
     local source = source
     
     if activeStreams[source] then
         CallMediaServer("/streams/" .. activeStreams[source].streamId .. "/stats", "GET", nil, 
         function(success, data)
             if success and data then
-                TriggerClientEvent('redm_streamer:stats', source, data)
+                TriggerClientEvent('redm_utk_streamer:stats', source, data)
             end
         end)
     end
@@ -337,12 +429,12 @@ RegisterCommand('streamplayer', function(source, args)
         if source == 0 then
             print("Usage: streamplayer <playerID>")
         else
-            TriggerClientEvent('redm_streamer:notify', source, 'Usage: /streamplayer <playerID>')
+            TriggerClientEvent('redm_utk_streamer:notify', source, 'Usage: /streamplayer <playerID>')
         end
         return
     end
     
-    TriggerEvent('redm_streamer:requestStream', targetId)
+    TriggerEvent('redm_utk_streamer:requestStream', targetId)
 end, false)
 
 RegisterCommand('streams', function(source)
@@ -366,7 +458,7 @@ RegisterCommand('streams', function(source)
         if source == 0 then
             print("No active streams")
         else
-            TriggerClientEvent('redm_streamer:notify', source, 'No active streams')
+            TriggerClientEvent('redm_utk_streamer:notify', source, 'No active streams')
         end
     end
 end, false)
@@ -376,7 +468,40 @@ RegisterCommand('monitor', function(source, args)
     if source == 0 then
         print("^2[Monitor]^7 Open browser to: http://localhost:3000/monitor")
     else
-        TriggerClientEvent('redm_streamer:notify', source, 'Monitor: http://localhost:3000/monitor')
+        TriggerClientEvent('redm_utk_streamer:notify', source, 'Monitor: http://localhost:3000/monitor')
+    end
+end, false)
+
+-- Reconnection command
+RegisterCommand('reconnect_streamer', function(source, args)
+    if source == 0 then
+        print("^3[RedM Streamer]^7 Forcing reconnection to media server...")
+        mediaServerConnected = false
+        reconnectAttempts = 0
+        connectionLostTime = 0
+        heartbeatFailures = 0
+
+        -- Force immediate reconnection attempt
+        CreateThread(function()
+            Wait(1000)
+            ForcePlayerListUpdate()
+        end)
+
+        print("^2[RedM Streamer]^7 Reconnection initiated")
+    else
+        TriggerClientEvent('redm_utk_streamer:notify', source, 'Only console can use this command')
+    end
+end, false)
+
+-- Status command
+RegisterCommand('streamer_status', function(source, args)
+    local message = string.format("^2[RedM Streamer Status]^7\nConnected: %s\nReconnect attempts: %d\nActive streams: %d\nHeartbeat failures: %d",
+        tostring(mediaServerConnected), reconnectAttempts, GetTableLength(activeStreams), heartbeatFailures)
+
+    if source == 0 then
+        print(message)
+    else
+        TriggerClientEvent('redm_utk_streamer:notify', source, message)
     end
 end, false)
 
@@ -443,4 +568,13 @@ function GenerateStreamId()
         streamId = streamId .. string.sub(chars, randIndex, randIndex)
     end
     return streamId
+end
+
+-- Helper function to get table length
+function GetTableLength(t)
+    local count = 0
+    for _ in pairs(t) do
+        count = count + 1
+    end
+    return count
 end

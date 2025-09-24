@@ -3,10 +3,10 @@ local currentStreamId = nil
 local streamConfig = nil
 
 -- Start streaming (triggered by server)
-RegisterNetEvent('redm_streamer:startStream')
-AddEventHandler('redm_streamer:startStream', function(config)
+RegisterNetEvent('redm_utk_streamer:startStream')
+AddEventHandler('redm_utk_streamer:startStream', function(config)
     if isStreaming then
-        TriggerEvent('redm_streamer:stopStream')
+        TriggerEvent('redm_utk_streamer:stopStream')
         Wait(2000) -- Give time for cleanup
     end
     
@@ -18,14 +18,13 @@ AddEventHandler('redm_streamer:startStream', function(config)
     -- Make sure NUI is ready
     Wait(1000)
     
-    -- Send configuration to NUI with proper websocket URL
+    -- Send configuration to NUI for direct streaming
     local nuiMessage = {
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        webSocketUrl = config.webSocketUrl or 'ws://localhost:3000/ws',
-        stunServer = config.stunServer or 'stun:stun.l.google.com:19302',
-        turnServer = config.turnServer,
+        webSocketUrl = 'ws://localhost:3000/ws',
+        stunServer = 'stun:stun.l.google.com:19302',
         quality = Config.StreamQuality
     }
     
@@ -36,7 +35,7 @@ AddEventHandler('redm_streamer:startStream', function(config)
     ShowNotification("ID: " .. config.streamId)
     
     -- Update server with stream start
-    TriggerServerEvent('redm_streamer:updateStats', {
+    TriggerServerEvent('redm_utk_streamer:updateStats', {
         status = 'started',
         streamId = config.streamId,
         timestamp = GetGameTimer()
@@ -44,15 +43,15 @@ AddEventHandler('redm_streamer:startStream', function(config)
 end)
 
 -- Stop streaming
-RegisterNetEvent('redm_streamer:stopStream')
-AddEventHandler('redm_streamer:stopStream', function()
+RegisterNetEvent('redm_utk_streamer:stopStream')
+AddEventHandler('redm_utk_streamer:stopStream', function()
     if not isStreaming then
         return
     end
     
     -- Update server with stream stop
     if currentStreamId then
-        TriggerServerEvent('redm_streamer:updateStats', {
+        TriggerServerEvent('redm_utk_streamer:updateStats', {
             status = 'stopped',
             streamId = currentStreamId,
             timestamp = GetGameTimer()
@@ -72,21 +71,21 @@ AddEventHandler('redm_streamer:stopStream', function()
 end)
 
 -- Show view URL
-RegisterNetEvent('redm_streamer:viewUrl')
-AddEventHandler('redm_streamer:viewUrl', function(data)
+RegisterNetEvent('redm_utk_streamer:viewUrl')
+AddEventHandler('redm_utk_streamer:viewUrl', function(data)
     ShowNotification("~g~Stream Ready~s~")
     ShowNotification("Player: " .. data.playerName)
     ShowNotification("URL: " .. data.hlsUrl)
 end)
 
 -- Show stats
-RegisterNetEvent('redm_streamer:stats')
-AddEventHandler('redm_streamer:stats', function(stats)
+RegisterNetEvent('redm_utk_streamer:stats')
+AddEventHandler('redm_utk_streamer:stats', function(stats)
 end)
 
 -- Notification
-RegisterNetEvent('redm_streamer:notify')
-AddEventHandler('redm_streamer:notify', function(message)
+RegisterNetEvent('redm_utk_streamer:notify')
+AddEventHandler('redm_utk_streamer:notify', function(message)
     ShowNotification(message)
 end)
 
@@ -94,7 +93,7 @@ end)
 RegisterNUICallback('streamStarted', function(data, cb)
     
     -- Notify server that stream is ready
-    TriggerServerEvent('redm_streamer:updateStats', {
+    TriggerServerEvent('redm_utk_streamer:updateStats', {
         status = 'connected',
         streamId = data.streamId or currentStreamId,
         streamKey = data.streamKey,
@@ -107,7 +106,7 @@ end)
 RegisterNUICallback('streamError', function(data, cb)
     
     -- Notify server about error
-    TriggerServerEvent('redm_streamer:updateStats', {
+    TriggerServerEvent('redm_utk_streamer:updateStats', {
         status = 'error',
         error = data.error,
         streamId = currentStreamId,
@@ -116,7 +115,7 @@ RegisterNUICallback('streamError', function(data, cb)
     
     -- Auto-stop on error
     if isStreaming then
-        TriggerEvent('redm_streamer:stopStream')
+        TriggerEvent('redm_utk_streamer:stopStream')
     end
     
     cb('ok')
@@ -131,7 +130,7 @@ RegisterNUICallback('streamStats', function(data, cb)
         enhancedStats.streamId = currentStreamId
         enhancedStats.timestamp = GetGameTimer()
         
-        TriggerServerEvent('redm_streamer:updateStats', enhancedStats)
+        TriggerServerEvent('redm_utk_streamer:updateStats', enhancedStats)
     end
     cb('ok')
 end)
@@ -143,7 +142,7 @@ end)
 -- Commands
 RegisterCommand('stopstream', function()
     if isStreaming then
-        TriggerServerEvent('redm_streamer:stopStream')
+        TriggerServerEvent('redm_utk_streamer:stopStream')
     else
         ShowNotification("~r~Not streaming~s~")
     end
@@ -151,7 +150,7 @@ end, false)
 
 RegisterCommand('streamstats', function()
     if isStreaming then
-        TriggerServerEvent('redm_streamer:getStats')
+        TriggerServerEvent('redm_utk_streamer:getStats')
     else
         ShowNotification("~r~Not streaming~s~")
     end
@@ -167,7 +166,7 @@ RegisterCommand('teststream', function()
             stunServer = 'stun:stun.l.google.com:19302',
             quality = Config.StreamQuality
         }
-        TriggerEvent('redm_streamer:startStream', testConfig)
+        TriggerEvent('redm_utk_streamer:startStream', testConfig)
     else
         ShowNotification("~r~Already streaming~s~")
     end
@@ -185,7 +184,7 @@ end, false)
 -- Auto-cleanup on resource restart
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName and isStreaming then
-        TriggerServerEvent('redm_streamer:stopStream')
+        TriggerServerEvent('redm_utk_streamer:stopStream')
     end
 end)
 
@@ -195,7 +194,7 @@ CreateThread(function()
         Wait(30000) -- Every 30 seconds
         
         if isStreaming and currentStreamId then
-            TriggerServerEvent('redm_streamer:updateStats', {
+            TriggerServerEvent('redm_utk_streamer:updateStats', {
                 status = 'heartbeat',
                 streamId = currentStreamId,
                 timestamp = GetGameTimer(),
@@ -215,7 +214,7 @@ end
 -- Export functions for other resources
 function StartStreamingExport(playerId)
     if playerId then
-        TriggerServerEvent('redm_streamer:requestStream', playerId)
+        TriggerServerEvent('redm_utk_streamer:requestStream', playerId)
     else
         ShowNotification("~r~Invalid player ID~s~")
     end
@@ -223,7 +222,7 @@ end
 
 function StopStreamingExport()
     if isStreaming then
-        TriggerServerEvent('redm_streamer:stopStream')
+        TriggerServerEvent('redm_utk_streamer:stopStream')
     else
         ShowNotification("~r~Not streaming~s~")
     end

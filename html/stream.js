@@ -85,13 +85,28 @@ class CfxGameViewRenderer {
   #animationFrame;
 
   constructor(canvas) {
-    const gl = canvas.getContext('webgl', {
+    const gl = canvas.getContext('webgl2', {
       antialias: false,
       depth: false,
       alpha: false,
       stencil: false,
-      desynchronized: true,
+      desynchronized: false,  // Keep synchronized for consistent quality
       powerPreference: 'high-performance',
+      preserveDrawingBuffer: false,
+      failIfMajorPerformanceCaveat: false,
+      premultipliedAlpha: false,
+      xrCompatible: false
+    }) || canvas.getContext('webgl', {
+      antialias: false,
+      depth: false,
+      alpha: false,
+      stencil: false,
+      desynchronized: false,  // Keep synchronized for consistent quality
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: false,
+      failIfMajorPerformanceCaveat: false,
+      premultipliedAlpha: false,
+      xrCompatible: false
     });
 
     if (!gl) {
@@ -161,6 +176,7 @@ class CfxGameViewRenderer {
     `;
 
     const fragmentShaderSrc = `
+    precision highp float;
     varying highp vec2 textureCoordinate;
     uniform sampler2D external_texture;
     void main()
@@ -190,6 +206,7 @@ class CfxGameViewRenderer {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, texPixels);
 
+    // Use nearest filtering for crisp, pixel-perfect rendering (no blur)
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -228,9 +245,19 @@ class CfxGameViewRenderer {
   }
 
   resize(width, height) {
-    this.#gl.viewport(0, 0, width, height);
-    this.#gl.canvas.width = width;
-    this.#gl.canvas.height = height;
+    const gl = this.#gl;
+    const canvas = gl.canvas;
+
+    // Set actual canvas size (device pixels)
+    canvas.width = width;
+    canvas.height = height;
+
+    // Set display size (CSS pixels) - important for sharp rendering
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+
+    // Set viewport
+    gl.viewport(0, 0, width, height);
   }
 
   destroy() {
@@ -244,7 +271,13 @@ class CfxGameViewRenderer {
     const gl = this.#gl;
     if (gl)
     {
+      // Clear buffers to prevent degradation
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // Draw the frame
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Don't flush - let browser handle it naturally for smoother streaming
     }
     this.#animationFrame = requestAnimationFrame(this.#render);
   };
@@ -274,22 +307,46 @@ async function startStream(config) {
         if (!canvas) {
             throw new Error('Canvas element not found');
         }
-        
+
+        // Set canvas size based on config - ensure pixel perfect rendering
+        const width = config.quality?.width || 1920;
+        const height = config.quality?.height || 1080;
+
+        // Get device pixel ratio for crisp rendering on high-DPI displays
+        const devicePixelRatio = window.devicePixelRatio || 1;
+
+        // Set actual canvas size (accounting for device pixel ratio)
+        canvas.width = width * devicePixelRatio;
+        canvas.height = height * devicePixelRatio;
+
+        // Set display size (CSS pixels)
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
+
         let MainRender = new CfxGameViewRenderer(canvas);
+
+        // Resize the renderer to match the actual canvas dimensions
+        MainRender.resize(width * devicePixelRatio, height * devicePixelRatio);
+
+        // Keep canvas hidden but available for capture
+        canvas.style.visibility = 'hidden';
+        canvas.style.display = 'block';
 
         // Wait for rendering to stabilize
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        // Try different capture methods
+        // Try different capture methods - don't interfere with WebGL context
         try {
-            // Method 1: Direct canvas capture
-            localStream = canvas.captureStream(30);
-            // Using canvas.captureStream
+            // Method 1: Direct canvas capture - WebGL handles quality internally
+            const targetFPS = Math.min(60, config.quality?.fps || 60);
+            localStream = canvas.captureStream(targetFPS);
+            // Using canvas.captureStream at ${targetFPS} FPS
         } catch (e1) {
             try {
                 // Method 2: Mozilla prefix
-                localStream = canvas.mozCaptureStream(30);
-                // Using canvas.mozCaptureStream
+                const targetFPS = Math.min(60, config.quality?.fps || 60);
+                localStream = canvas.mozCaptureStream(targetFPS);
+                // Using canvas.mozCaptureStream at ${targetFPS} FPS
             } catch (e2) {
             }
         }
@@ -525,17 +582,43 @@ async function handleViewerJoined(viewerId) {
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
         ],
-        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all',
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+        iceCandidatePoolSize: 0
     };
 
     const viewerPc = new RTCPeerConnection(configuration);
 
-    // Add tracks
+    // Add tracks with encoding parameters for better quality
     if (localStream) {
         const tracks = localStream.getTracks();
         tracks.forEach(track => {
+            const sender = viewerPc.addTrack(track, localStream);
+
+            // Apply encoding parameters for video tracks - optimized for sharpness
+            if (track.kind === 'video') {
+                const params = sender.getParameters();
+                if (params.encodings && params.encodings.length > 0) {
+                    // Maximum quality settings for crisp video
+                    params.encodings[0].maxBitrate = streamConfig?.quality?.bitrate || 25000000; // 25 Mbps
+                    params.encodings[0].maxFramerate = Math.min(60, streamConfig?.quality?.fps || 60);
+                    params.encodings[0].scaleResolutionDownBy = 1; // No downscaling
+
+                    // Quality-focused encoding settings
+                    if (params.encodings[0].hasOwnProperty('priority')) {
+                        params.encodings[0].priority = 'high';
+                    }
+                    if (params.encodings[0].hasOwnProperty('networkPriority')) {
+                        params.encodings[0].networkPriority = 'high';
+                    }
+
+                    sender.setParameters(params).catch(err => {
+                        // Failed to set encoding parameters
+                    });
+                }
+            }
             // Adding track to peer connection
-            viewerPc.addTrack(track, localStream);
         });
         // Added tracks to peer connection
     } else {
@@ -565,10 +648,17 @@ async function handleViewerJoined(viewerId) {
     
     viewers.set(viewerId, viewerPc);
     
-    // Create offer
+    // Create offer with quality-focused constraints
     try {
-        // Creating offer for viewer
-        const offer = await viewerPc.createOffer();
+        // Creating offer for viewer with optimal settings
+        const offerOptions = {
+            offerToReceiveVideo: false,
+            offerToReceiveAudio: false,
+            voiceActivityDetection: false,
+            iceRestart: false
+        };
+
+        const offer = await viewerPc.createOffer(offerOptions);
         await viewerPc.setLocalDescription(offer);
 
         // Offer created, sending to server
@@ -687,28 +777,65 @@ function stopStream() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
         canvas.style.display = 'none';
+        canvas.style.visibility = 'hidden';
     }
 }
 
 function startFPSMonitoring(canvas) {
     let lastTime = performance.now();
     let frames = 0;
-    
+    let performanceHistory = [];
+    let qualityAdjustmentTimer = null;
+
     const checkFPS = () => {
         if (!isStreaming) return;
-        
+
         frames++;
         const now = performance.now();
         if (now - lastTime >= 1000) {
-            updateDebug('fps', frames);
+            const currentFPS = frames;
+            updateDebug('fps', currentFPS);
+
+            // Track performance for adaptive quality
+            performanceHistory.push({
+                fps: currentFPS,
+                timestamp: now,
+                memoryUsage: performance.memory ? performance.memory.usedJSHeapSize : 0
+            });
+
+            // Keep only last 10 seconds of data
+            performanceHistory = performanceHistory.filter(p => now - p.timestamp < 10000);
+
+            // Adaptive quality adjustment (every 5 seconds)
+            if (!qualityAdjustmentTimer) {
+                qualityAdjustmentTimer = setTimeout(() => {
+                    adjustStreamQuality(performanceHistory);
+                    qualityAdjustmentTimer = null;
+                }, 5000);
+            }
+
             frames = 0;
             lastTime = now;
         }
-        
+
         requestAnimationFrame(checkFPS);
     };
-    
+
     checkFPS();
+}
+
+// Adaptive quality adjustment based on performance
+function adjustStreamQuality(performanceData) {
+    if (performanceData.length < 3 || !localStream) return;
+
+    const avgFPS = performanceData.reduce((sum, p) => sum + p.fps, 0) / performanceData.length;
+    const targetFPS = Math.min(60, streamConfig?.quality?.fps || 60);
+
+    // If FPS is consistently low, we might need to reduce quality
+    if (avgFPS < targetFPS * 0.8) {
+        // Performance is suffering - could implement quality reduction here
+        console.log(`[Performance] Average FPS: ${avgFPS.toFixed(1)}, Target: ${targetFPS}`);
+    }
 }
 
 // Notification functions
@@ -793,5 +920,13 @@ window.addEventListener('beforeunload', () => {
         stopStream();
     }
 });
+
+// Periodic memory cleanup to prevent buffer degradation (reduced frequency)
+setInterval(() => {
+    if (isStreaming && typeof gc !== 'undefined') {
+        // Force garbage collection if available (Chrome with --js-flags="--expose-gc")
+        gc();
+    }
+}, 120000); // Every 2 minutes
 
 // Stream script loaded
