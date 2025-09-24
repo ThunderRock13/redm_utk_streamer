@@ -353,7 +353,6 @@ function setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, 
             <span>${playerName}</span>
         </div>
         <div class="stream-actions">
-            <button class="stream-btn" onclick="toggleAudio('${playerId}')">🔊</button>
             <button class="stream-btn" onclick="fullscreenPanel(${panelId})">⛶</button>
             <button class="stream-btn" onclick="stopPlayerStream(${playerId})">✕</button>
         </div>
@@ -1364,22 +1363,6 @@ function saveSettings() {
 }
 
 // Utility functions
-function toggleAudio(playerId) {
-    playerId = parseInt(playerId);
-    const stream = activeStreams.get(playerId);
-    if (stream && stream.video) {
-        stream.video.muted = !stream.video.muted;
-        console.log('🔊 Audio toggled for player', playerId, 'muted:', stream.video.muted);
-        
-        // Update button text/icon if needed
-        const button = document.querySelector(`button[onclick="toggleAudio('${playerId}')"]`);
-        if (button) {
-            button.textContent = stream.video.muted ? '🔊' : '🔇';
-        }
-    } else {
-        console.error('❌ No stream found for audio toggle, player:', playerId);
-    }
-}
 
 // Debug functions for console
 window.monitorDebug = {

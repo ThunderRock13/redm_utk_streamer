@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
 const http = require('http');
-const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
@@ -10,12 +9,10 @@ const turn = require('node-turn');
 require('dotenv').config();
 
 const app = express();
-
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const TURN_PORT = process.env.TURN_PORT || 3478;
 const API_KEY = process.env.API_KEY || 'redm-media-server-key-2024';
-
 
 // Built-in TURN server configuration
 const turnServer = new turn({
@@ -38,22 +35,13 @@ app.use(cors());
 app.use(express.json());
 app.use('/player', express.static(path.join(__dirname, 'public')));
 
-// Root route redirects to monitor
-app.get('/', (req, res) => {
-    res.redirect('/monitor');
-});
+// Serve static files for monitor assets first
+app.use('/assets', express.static(path.join(__dirname, 'public')));
 
-// Serve monitor page specifically (BEFORE static middleware)
+// Serve monitor page
 app.get('/monitor', (req, res) => {
-    console.log('Monitor page requested');
     res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
 });
-
-// Serve static files for monitor assets (js, css, etc.)
-app.use('/monitor', express.static(path.join(__dirname, 'public')));
-
-// Also serve static files directly from root for assets
-app.use(express.static(path.join(__dirname, 'public')));
 
 // WebSocket server for WebRTC signaling
 const wss = new WebSocket.Server({ 
@@ -208,6 +196,8 @@ app.get('/api/streams', authenticateAPI, (req, res) => {
 app.post('/api/players/update', authenticateAPI, (req, res) => {
     playerList = req.body.players || [];
 
+    console.log(`[API] Player list updated: ${playerList.length} players`);
+
     // Broadcast to all monitor connections
     broadcastToMonitors({
         type: 'player-update',
@@ -302,169 +292,6 @@ app.get('/api/webrtc/config', (req, res) => {
     res.json(config);
 });
 
-// Simple HTTP notification endpoint for mixed content fallback
-app.post('/api/streams/notify-ready', authenticateAPI, (req, res) => {
-    const { streamKey, message } = req.body;
-
-    console.log('Stream ready notification:', streamKey, '-', message);
-
-    // Find the stream
-    let stream = null;
-    for (const [id, s] of activeStreams) {
-        if (s.streamKey === streamKey) {
-            stream = s;
-            break;
-        }
-    }
-
-    if (stream) {
-        stream.httpNotified = true;
-        console.log('Stream marked as ready via HTTP notification');
-    }
-
-    // Always respond with success - this is just a notification
-    res.json({
-        success: true,
-        message: 'Notification received'
-    });
-});
-
-// Bridge API endpoints for HTTPS mixed content workaround
-const bridgeConnections = new Map(); // streamKey -> { playerId, playerName, messageQueue: [], lastPoll: timestamp }
-
-app.post('/api/bridge/register', authenticateAPI, (req, res) => {
-    const { streamKey, playerId, playerName } = req.body;
-
-    console.log('Bridge registration:', streamKey, 'for player', playerId);
-
-    // Initialize bridge connection
-    bridgeConnections.set(streamKey, {
-        playerId,
-        playerName,
-        messageQueue: [],
-        lastPoll: Date.now()
-    });
-
-    // Simulate WebSocket registration
-    const registrationMessage = {
-        type: 'registered',
-        streamKey,
-        timestamp: Date.now()
-    };
-
-    // Add to message queue
-    const bridge = bridgeConnections.get(streamKey);
-    if (bridge) {
-        bridge.messageQueue.push(registrationMessage);
-    }
-
-    res.json({ success: true, message: 'Bridge registered' });
-});
-
-app.post('/api/bridge/poll', authenticateAPI, (req, res) => {
-    const { streamKey, playerId } = req.body;
-
-    const bridge = bridgeConnections.get(streamKey);
-    if (!bridge) {
-        return res.json({ messages: [] });
-    }
-
-    // Update last poll time
-    bridge.lastPoll = Date.now();
-
-    // Get pending messages
-    const messages = bridge.messageQueue.splice(0); // Get all messages and clear queue
-
-    if (messages.length > 0) {
-        console.log(`[BRIDGE] Sending ${messages.length} messages to client for ${streamKey}:`, messages.map(m => m.type));
-    }
-
-    res.json({ messages });
-});
-
-app.post('/api/bridge/send', authenticateAPI, (req, res) => {
-    const { streamKey, playerId, message } = req.body;
-
-    console.log('Bridge message received:', message.type, 'for stream', streamKey);
-
-    // Process the message as if it came from WebSocket
-    processBridgeMessage(streamKey, message);
-
-    res.json({ success: true });
-});
-
-app.post('/api/bridge/cleanup', authenticateAPI, (req, res) => {
-    const { streamKey, playerId, reason } = req.body;
-
-    console.log('Bridge cleanup:', streamKey, 'reason:', reason);
-
-    // Remove bridge connection
-    bridgeConnections.delete(streamKey);
-
-    // Clean up any associated streams
-    for (const [id, stream] of activeStreams) {
-        if (stream.streamKey === streamKey) {
-            activeStreams.delete(id);
-            console.log('Cleaned up stream:', id);
-            break;
-        }
-    }
-
-    res.json({ success: true });
-});
-
-// Helper function to process bridge messages
-function processBridgeMessage(streamKey, message) {
-    // Handle different message types as if they came from WebSocket
-    switch (message.type) {
-        case 'register-streamer':
-            // Already handled in registration
-            break;
-
-        case 'offer':
-        case 'answer':
-        case 'ice-candidate':
-            // These need to be forwarded to viewers
-            forwardToViewers(streamKey, message);
-            break;
-
-        case 'cleanup-stream':
-            // Handle stream cleanup
-            bridgeConnections.delete(streamKey);
-            break;
-    }
-}
-
-// Helper function to forward messages to viewers
-function forwardToViewers(streamKey, message) {
-    // Find viewers for this stream and forward the message
-    console.log(`[BRIDGE] Forwarding ${message.type} to viewers for stream ${streamKey}`);
-    let forwardedCount = 0;
-
-    for (const [clientId, connection] of connections) {
-        if ((connection.role === 'viewer' || connection.role === 'monitor') && connection.streamKey === streamKey) {
-            if (connection.ws && connection.ws.readyState === WebSocket.OPEN) {
-                console.log(`[BRIDGE] Forwarding ${message.type} to ${connection.role} ${clientId}`);
-                connection.ws.send(JSON.stringify(message));
-                forwardedCount++;
-            }
-        }
-    }
-
-    console.log(`[BRIDGE] Forwarded ${message.type} to ${forwardedCount} viewers for stream ${streamKey}`);
-}
-
-// Helper function to send message to bridge
-function sendToBridge(streamKey, message) {
-    const bridge = bridgeConnections.get(streamKey);
-    if (bridge) {
-        console.log(`[BRIDGE] Sending message to bridge for ${streamKey}: ${message.type}`);
-        bridge.messageQueue.push(message);
-    } else {
-        console.log(`[BRIDGE] No bridge found for ${streamKey} - message ${message.type} not sent`);
-    }
-}
-
 // Endpoint for RedM server to notify stream ended
 app.post('/api/monitor/stream-ended', authenticateAPI, (req, res) => {
     const { playerId, streamId, streamKey, reason } = req.body;
@@ -547,11 +374,14 @@ function stopStream(streamId) {
 
 // Helper function to broadcast to all monitors
 function broadcastToMonitors(message) {
+    let monitorCount = 0;
     connections.forEach((conn, clientId) => {
         if (conn.role === 'monitor' && conn.ws.readyState === WebSocket.OPEN) {
             conn.ws.send(JSON.stringify(message));
+            monitorCount++;
         }
     });
+    console.log(`[Broadcast] Sent ${message.type} to ${monitorCount} monitors`);
 }
 
 // WebSocket handling
@@ -676,18 +506,21 @@ function handleMonitorRegistration(clientId, ws, data) {
     const connection = connections.get(clientId);
     connection.role = 'monitor';
     monitorConnections.add(clientId);
-    
+
+    console.log(`[Monitor] Monitor registered: ${clientId}`);
+
     ws.send(JSON.stringify({
-        type: 'registered', 
+        type: 'registered',
         role: 'monitor'
     }));
-    
+
     // Send current player list
+    console.log(`[Monitor] Sending ${playerList.length} players to monitor`);
     ws.send(JSON.stringify({
-        type: 'player-update', 
+        type: 'player-update',
         players: playerList
     }));
-    
+
     // Send current active streams
     const streams = Array.from(activeStreams.values()).map(stream => ({
         streamId: stream.streamId,
@@ -697,7 +530,7 @@ function handleMonitorRegistration(clientId, ws, data) {
         viewers: stream.viewerCount || 0
     }));
     ws.send(JSON.stringify({
-        type: 'active-streams', 
+        type: 'active-streams',
         streams: streams
     }));
     
@@ -1014,11 +847,9 @@ function handleViewerRegistration(clientId, ws, data) {
         return;
     }
 
-    // Update connection (preserve monitor role if already set)
+    // Update connection
     const connection = connections.get(clientId);
-    if (connection.role !== 'monitor') {
-        connection.role = 'viewer';
-    }
+    connection.role = 'viewer';
     connection.streamKey = streamKey;
 
     // Store panel ID properly (handle panelId: 0 correctly)
@@ -1037,18 +868,10 @@ function handleViewerRegistration(clientId, ws, data) {
     // Cancel auto-stop if viewer joined
     cancelAutoStop(stream);
 
-    // Clean up any dead sharing entries first
-    cleanupDeadSharingEntries(streamKey);
-
     // Check if this is the first viewer or if there's already a primary viewer
     let sharing = streamSharing.get(streamKey);
-    const isMonitorViewer = connection.role === 'monitor';
-
-    console.log(`[DEBUG] Viewer registration - ClientID: ${clientId}, Role: ${connection.role}, IsMonitor: ${isMonitorViewer}`);
-
     if (!sharing) {
         // This is the first viewer - make them the primary
-        console.log(`[DEBUG] No existing sharing - making first viewer primary`);
         sharing = {
             primaryViewer: clientId,
             sharedViewers: new Set(),
@@ -1058,27 +881,15 @@ function handleViewerRegistration(clientId, ws, data) {
     } else {
         // Check if the current primary viewer is still connected
         const primaryConnection = connections.get(sharing.primaryViewer);
-        const primaryIsMonitor = primaryConnection && primaryConnection.role === 'monitor';
-
-        console.log(`[DEBUG] Existing primary - ID: ${sharing.primaryViewer}, Role: ${primaryConnection?.role}, IsMonitor: ${primaryIsMonitor}, Connected: ${primaryConnection?.ws?.readyState === WebSocket.OPEN}`);
-
         if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
             // Primary viewer is disconnected - make this viewer the new primary
-            console.log(`[DEBUG] Primary disconnected - promoting current viewer to primary`);
+
             sharing.primaryViewer = clientId;
             sharing.sharedViewers.clear(); // Clear any shared viewers
-        } else if (isMonitorViewer && !primaryIsMonitor) {
-            // This is a monitor viewer and current primary is not a monitor
-            // Make the monitor the primary viewer (monitors get priority)
-            console.log('[DEBUG] Monitor viewer taking priority over regular viewer');
-            sharing.sharedViewers.add(sharing.primaryViewer); // Demote current primary to shared
-            sharing.primaryViewer = clientId;
         }
     }
 
     // Determine if this viewer should be primary or shared
-    console.log(`[DEBUG] Final decision - Current primary: ${sharing.primaryViewer}, Current viewer: ${clientId}, Will be primary: ${sharing.primaryViewer === clientId}`);
-
     if (sharing.primaryViewer === clientId) {
 
 
@@ -1095,21 +906,16 @@ function handleViewerRegistration(clientId, ws, data) {
 
 
 
+        if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
         const viewerMessage = {
             type: 'viewer-joined',
             viewerId: clientId,
             panelId: panelId  // Include panelId in viewer-joined message
         };
 
-        // Send to WebSocket if available
-        if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
-            stream.streamerWs.send(JSON.stringify(viewerMessage));
-        }
 
-        // Also send to bridge if registered
-        sendToBridge(streamKey, viewerMessage);
+        stream.streamerWs.send(JSON.stringify(viewerMessage));
 
-        return; // Exit here for primary viewers
 
     } else {
 
@@ -1131,10 +937,9 @@ function handleViewerRegistration(clientId, ws, data) {
 
             }
         }, 2000);
-    }
-
-    // This is a secondary viewer - but check if primary is still active
-    if (sharing.primaryViewer !== clientId) {
+        }
+    } else {
+        // This is a secondary viewer - but check if primary is still active
         const primaryConnection = connections.get(sharing.primaryViewer);
         if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
             // Primary is gone, promote this viewer to primary instead
@@ -1744,29 +1549,6 @@ process.on('SIGINT', () => {
         });
     });
 });
-
-// Cleanup function for dead sharing entries
-function cleanupDeadSharingEntries(streamKey) {
-    const sharing = streamSharing.get(streamKey);
-    if (!sharing) return;
-
-    // Check if primary viewer is still connected
-    const primaryConnection = connections.get(sharing.primaryViewer);
-    if (!primaryConnection || primaryConnection.ws.readyState !== WebSocket.OPEN) {
-        console.log(`[DEBUG] Cleaning up dead primary viewer: ${sharing.primaryViewer}`);
-        streamSharing.delete(streamKey);
-        return;
-    }
-
-    // Clean up dead shared viewers
-    for (const viewerId of sharing.sharedViewers) {
-        const connection = connections.get(viewerId);
-        if (!connection || connection.ws.readyState !== WebSocket.OPEN) {
-            console.log(`[DEBUG] Removing dead shared viewer: ${viewerId}`);
-            sharing.sharedViewers.delete(viewerId);
-        }
-    }
-}
 
 // Keep alive
 setInterval(() => {

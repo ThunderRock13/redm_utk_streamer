@@ -9,10 +9,10 @@
       "Bash(curl:*)",
       "Bash(nslookup:*)",
       "Bash(npm install:*)",
-      "Bash(node:*)",
-      "Bash(taskkill:*)",
-      "Bash(openssl req:*)",
-      "Bash(npm start)"
+      "Bash(npm start)",
+      "Bash(netstat:*)",
+      "Bash(tasklist)",
+      "Bash(tasklist:*)"
     ],
     "deny": [],
     "ask": []

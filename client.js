@@ -9,7 +9,7 @@ let streamId = null;
 // Remove all UI-related code, keep only streaming logic
 // No commands for UI, everything is event-based
 
-onNet("redm_streamer:initStream", (config) => {
+onNet("redm_utk_streamer:initStream", (config) => {
     // This is triggered when we need to prepare the stream
     SendNUIMessage({
         action: "INIT_STREAM",

@@ -64,9 +64,9 @@ function updateDebug(field, value) {
 // Listen for messages from game
 window.addEventListener('message', async (event) => {
     const data = event.data;
-
+    
     // Received message
-
+    
     switch(data.action) {
         case 'START_STREAM':
             // START_STREAM config received
@@ -75,14 +75,6 @@ window.addEventListener('message', async (event) => {
         case 'STOP_STREAM':
             // STOP_STREAM received
             stopStream();
-            break;
-        case 'BRIDGE_REGISTERED':
-            // Bridge registration successful
-            handleBridgeRegistered(data);
-            break;
-        case 'BRIDGE_MESSAGE':
-            // Message from bridge
-            handleBridgeMessage(data.message);
             break;
     }
 });
@@ -93,13 +85,28 @@ class CfxGameViewRenderer {
   #animationFrame;
 
   constructor(canvas) {
-    const gl = canvas.getContext('webgl', {
+    const gl = canvas.getContext('webgl2', {
       antialias: false,
       depth: false,
       alpha: false,
       stencil: false,
-      desynchronized: true,
+      desynchronized: false,  // Keep synchronized for consistent quality
       powerPreference: 'high-performance',
+      preserveDrawingBuffer: false,
+      failIfMajorPerformanceCaveat: false,
+      premultipliedAlpha: false,
+      xrCompatible: false
+    }) || canvas.getContext('webgl', {
+      antialias: false,
+      depth: false,
+      alpha: false,
+      stencil: false,
+      desynchronized: false,  // Keep synchronized for consistent quality
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: false,
+      failIfMajorPerformanceCaveat: false,
+      premultipliedAlpha: false,
+      xrCompatible: false
     });
 
     if (!gl) {
@@ -169,6 +176,7 @@ class CfxGameViewRenderer {
     `;
 
     const fragmentShaderSrc = `
+    precision highp float;
     varying highp vec2 textureCoordinate;
     uniform sampler2D external_texture;
     void main()
@@ -198,6 +206,7 @@ class CfxGameViewRenderer {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, texPixels);
 
+    // Use nearest filtering for crisp, pixel-perfect rendering (no blur)
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameterf(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -236,9 +245,19 @@ class CfxGameViewRenderer {
   }
 
   resize(width, height) {
-    this.#gl.viewport(0, 0, width, height);
-    this.#gl.canvas.width = width;
-    this.#gl.canvas.height = height;
+    const gl = this.#gl;
+    const canvas = gl.canvas;
+
+    // Set actual canvas size (device pixels)
+    canvas.width = width;
+    canvas.height = height;
+
+    // Set display size (CSS pixels) - important for sharp rendering
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+
+    // Set viewport
+    gl.viewport(0, 0, width, height);
   }
 
   destroy() {
@@ -252,17 +271,23 @@ class CfxGameViewRenderer {
     const gl = this.#gl;
     if (gl)
     {
+      // Clear buffers to prevent degradation
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // Draw the frame
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Don't flush - let browser handle it naturally for smoother streaming
     }
     this.#animationFrame = requestAnimationFrame(this.#render);
   };
 }
 
 async function startStream(config) {
-    console.log('Starting stream:', config.streamId);
+    // Starting stream
 
     if (isStreaming) {
-        console.log('Already streaming, stopping first');
+        // Already streaming, stopping first
         stopStream();
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -283,25 +308,45 @@ async function startStream(config) {
             throw new Error('Canvas element not found');
         }
 
-        console.log('Canvas found:', canvas.width, 'x', canvas.height);
+        // Set canvas size based on config - ensure pixel perfect rendering
+        const width = config.quality?.width || 1920;
+        const height = config.quality?.height || 1080;
+
+        // Get device pixel ratio for crisp rendering on high-DPI displays
+        const devicePixelRatio = window.devicePixelRatio || 1;
+
+        // Set actual canvas size (accounting for device pixel ratio)
+        canvas.width = width * devicePixelRatio;
+        canvas.height = height * devicePixelRatio;
+
+        // Set display size (CSS pixels)
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
 
         let MainRender = new CfxGameViewRenderer(canvas);
-        console.log('CfxGameViewRenderer initialized');
+
+        // Resize the renderer to match the actual canvas dimensions
+        MainRender.resize(width * devicePixelRatio, height * devicePixelRatio);
+
+        // Keep canvas hidden but available for capture
+        canvas.style.visibility = 'hidden';
+        canvas.style.display = 'block';
 
         // Wait for rendering to stabilize
-        console.log('Waiting for rendering to stabilize...');
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        // Try different capture methods
+        // Try different capture methods - don't interfere with WebGL context
         try {
-            // Method 1: Direct canvas capture
-            localStream = canvas.captureStream(30);
-            // Using canvas.captureStream
+            // Method 1: Direct canvas capture - WebGL handles quality internally
+            const targetFPS = Math.min(60, config.quality?.fps || 60);
+            localStream = canvas.captureStream(targetFPS);
+            // Using canvas.captureStream at ${targetFPS} FPS
         } catch (e1) {
             try {
                 // Method 2: Mozilla prefix
-                localStream = canvas.mozCaptureStream(30);
-                // Using canvas.mozCaptureStream
+                const targetFPS = Math.min(60, config.quality?.fps || 60);
+                localStream = canvas.mozCaptureStream(targetFPS);
+                // Using canvas.mozCaptureStream at ${targetFPS} FPS
             } catch (e2) {
             }
         }
@@ -309,15 +354,8 @@ async function startStream(config) {
         // Verify stream has tracks
         const videoTracks = localStream.getVideoTracks();
         const audioTracks = localStream.getAudioTracks();
-
-        console.log(`Stream tracks - Video: ${videoTracks.length}, Audio: ${audioTracks.length}`);
-        if (videoTracks.length > 0) {
-            console.log('Video track details:', {
-                enabled: videoTracks[0].enabled,
-                readyState: videoTracks[0].readyState,
-                settings: videoTracks[0].getSettings()
-            });
-        }
+        
+        // Stream tracks checked
         
         if (videoTracks.length === 0) {
             // Try to create a test pattern if no video
@@ -331,13 +369,9 @@ async function startStream(config) {
             }
             // Using test pattern as fallback
         }
-
-        // Connect to signaling server (or use bridge mode)
-        if (config.bridgeMode) {
-            connectViaBridge(config);
-        } else {
-            connectToSignalingServer(config);
-        }
+        
+        // Connect to signaling server
+        connectToSignalingServer(config);
         
         // Start FPS monitoring
         startFPSMonitoring(canvas);
@@ -374,54 +408,46 @@ function createTestPattern(canvas) {
 }
 
 function connectToSignalingServer(config) {
+    const wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
     const streamKey = config.streamKey || config.streamId;
-
-    // Skip WebSocket entirely in HTTPS context due to mixed content issues
-    if (window.location.protocol === 'https:') {
-        console.log('HTTPS context detected - skipping WebSocket, using direct mode');
-        useHttpPollingFallback(config);
-        return;
-    }
-
-    let wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
-    console.log('Attempting to connect to WebSocket:', wsUrl);
-
+    
+    // Connecting to WebSocket
+    
     if (ws) {
         ws.close();
     }
-
-    // Try WebSocket connection
+    
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-        console.log('WebSocket connected');
+        // WebSocket connected
         clearReconnectTimer();
-
+        
         // Register as streamer with validation
         const streamKey = config.streamKey || config.streamId;
-        console.log('Registering with stream key:', streamKey);
+        // Registering with stream key
 
-        sendWebSocketMessage({
+        ws.send(JSON.stringify({
             type: 'register-streamer',
             streamKey: streamKey
-        });
-
+        }));
+        
         // Start heartbeat
         startHeartbeat();
     };
     
     ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        console.log('WebSocket message received:', data.type);
+        // WebSocket message received
 
         switch(data.type) {
             case 'registered':
-                console.log('Registered as streamer');
+                // Registered as streamer
                 notifyStreamStarted();
                 break;
 
             case 'viewer-joined':
-                console.log('Viewer joined message received:', data);
+                // Viewer joined
                 await handleViewerJoined(data.viewerId);
                 updateDebug('viewerCount', viewers.size);
                 break;
@@ -446,7 +472,7 @@ function connectToSignalingServer(config) {
                 break;
 
             case 'ping':
-                sendWebSocketMessage({ type: 'pong' });
+                ws.send(JSON.stringify({ type: 'pong' }));
                 break;
 
             case 'error':
@@ -473,13 +499,7 @@ function connectToSignalingServer(config) {
     };
     
     ws.onerror = (error) => {
-        console.error('[Stream] WebSocket error:', error);
-
-        // If this is a mixed content error, try the HTTP fallback
-        if (window.location.protocol === 'https:') {
-            console.log('WebSocket failed in HTTPS context, falling back to HTTP registration');
-            useHttpPollingFallback(streamConfig);
-        }
+        // WebSocket error
     };
     
     ws.onclose = (event) => {
@@ -498,84 +518,6 @@ function connectToSignalingServer(config) {
             stopStream();
         }
     };
-}
-
-// Direct streaming mode for HTTPS mixed content issues
-function useHttpPollingFallback(config) {
-    console.log('Running in direct streaming mode (no WebSocket)');
-
-    // Set up config for direct mode
-    streamConfig = config;
-    streamConfig.directMode = true;
-
-    // Try to establish direct peer connection after stream is ready
-    setTimeout(() => {
-        setupDirectPeerConnection(config);
-    }, 1000);
-
-    // Start heartbeat simulation
-    if (!heartbeatTimer) {
-        heartbeatTimer = setInterval(() => {
-            console.log('Direct mode heartbeat - stream active');
-        }, 30000);
-    }
-
-    notifyStreamStarted();
-}
-
-// Setup peer connection directly without WebSocket signaling
-async function setupDirectPeerConnection(config) {
-    console.log('Setting up direct peer connection');
-
-    try {
-        // Create peer connection
-        const pc = new RTCPeerConnection({
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:192.99.60.230:3478' }
-            ]
-        });
-
-        // Add video track to peer connection
-        if (localStream && localStream.getVideoTracks().length > 0) {
-            localStream.getVideoTracks().forEach(track => {
-                pc.addTrack(track, localStream);
-                console.log('Added video track to peer connection');
-            });
-
-            // Create offer and set as local description
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            console.log('Created SDP offer for direct connection');
-
-            // Store the peer connection for potential manual connection
-            window.directPeerConnection = pc;
-            window.directOffer = offer;
-
-            console.log('Direct peer connection ready - offer available');
-            console.log('SDP Offer:', offer.sdp.substring(0, 100) + '...');
-
-            // Make connection function globally available
-            window.connectDirectStream = function() {
-                console.log('=== DIRECT STREAM CONNECTION INFO ===');
-                console.log('Stream ID:', config.streamId || config.streamKey);
-                console.log('Stream Key:', config.streamKey);
-                console.log('SDP Offer:', offer.sdp);
-                console.log('=== TO CONNECT FROM MONITOR ===');
-                console.log('1. Open monitor in browser console');
-                console.log('2. Run: window.connectToDirectStream("' + config.streamKey + '", `' + offer.sdp + '`)');
-                return {
-                    streamKey: config.streamKey,
-                    offer: offer.sdp,
-                    peerConnection: pc
-                };
-            };
-
-            console.log('🎯 Call window.connectDirectStream() for connection details');
-        }
-    } catch (error) {
-        console.error('Direct peer connection setup failed:', error);
-    }
 }
 
 function startHeartbeat() {
@@ -633,40 +575,64 @@ function clearReconnectTimer() {
 }
 
 async function handleViewerJoined(viewerId) {
-    console.log('Viewer joined:', viewerId);
-    console.log('Local stream available:', !!localStream);
-    console.log('Local stream tracks:', localStream ? localStream.getTracks().length : 0);
+    // Viewer joined
 
     const configuration = {
         iceServers: webrtcConfig ? webrtcConfig.iceServers : [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
         ],
-        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all'
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all',
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+        iceCandidatePoolSize: 0
     };
 
     const viewerPc = new RTCPeerConnection(configuration);
 
-    // Add tracks
+    // Add tracks with encoding parameters for better quality
     if (localStream) {
         const tracks = localStream.getTracks();
         tracks.forEach(track => {
-            console.log('Adding track to peer connection:', track.kind, track.enabled);
-            viewerPc.addTrack(track, localStream);
+            const sender = viewerPc.addTrack(track, localStream);
+
+            // Apply encoding parameters for video tracks - optimized for sharpness
+            if (track.kind === 'video') {
+                const params = sender.getParameters();
+                if (params.encodings && params.encodings.length > 0) {
+                    // Maximum quality settings for crisp video
+                    params.encodings[0].maxBitrate = streamConfig?.quality?.bitrate || 25000000; // 25 Mbps
+                    params.encodings[0].maxFramerate = Math.min(60, streamConfig?.quality?.fps || 60);
+                    params.encodings[0].scaleResolutionDownBy = 1; // No downscaling
+
+                    // Quality-focused encoding settings
+                    if (params.encodings[0].hasOwnProperty('priority')) {
+                        params.encodings[0].priority = 'high';
+                    }
+                    if (params.encodings[0].hasOwnProperty('networkPriority')) {
+                        params.encodings[0].networkPriority = 'high';
+                    }
+
+                    sender.setParameters(params).catch(err => {
+                        // Failed to set encoding parameters
+                    });
+                }
+            }
+            // Adding track to peer connection
         });
-        console.log('Added', tracks.length, 'tracks to peer connection');
+        // Added tracks to peer connection
     } else {
-        console.log('ERROR: No local stream available for viewer connection');
+        // ERROR: No local stream available
     }
     
     // ICE candidates
     viewerPc.onicecandidate = (event) => {
-        if (event.candidate) {
-            sendWebSocketMessage({
+        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
                 type: 'ice-candidate',
                 candidate: event.candidate,
                 viewerId: viewerId
-            });
+            }));
         }
     };
     
@@ -682,10 +648,17 @@ async function handleViewerJoined(viewerId) {
     
     viewers.set(viewerId, viewerPc);
     
-    // Create offer
+    // Create offer with quality-focused constraints
     try {
-        // Creating offer for viewer
-        const offer = await viewerPc.createOffer();
+        // Creating offer for viewer with optimal settings
+        const offerOptions = {
+            offerToReceiveVideo: false,
+            offerToReceiveAudio: false,
+            voiceActivityDetection: false,
+            iceRestart: false
+        };
+
+        const offer = await viewerPc.createOffer(offerOptions);
         await viewerPc.setLocalDescription(offer);
 
         // Offer created, sending to server
@@ -696,7 +669,7 @@ async function handleViewerJoined(viewerId) {
         };
 
         // Sending offer message
-        sendWebSocketMessage(offerMessage);
+        ws.send(JSON.stringify(offerMessage));
         // Offer sent successfully
 
     } catch (error) {
@@ -759,13 +732,13 @@ function stopStream() {
     if (ws) {
         try {
             // Send cleanup notification before closing
-            if (streamConfig) {
-                sendWebSocketMessage({
+            if (ws.readyState === WebSocket.OPEN && streamConfig) {
+                ws.send(JSON.stringify({
                     type: 'cleanup-stream',
                     streamKey: streamConfig.streamKey || streamConfig.streamId,
                     playerId: streamConfig.playerId,
                     reason: 'manual_stop'
-                });
+                }));
             }
             ws.close(1000, 'Stream stopped');
         } catch (e) {
@@ -804,28 +777,65 @@ function stopStream() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
         canvas.style.display = 'none';
+        canvas.style.visibility = 'hidden';
     }
 }
 
 function startFPSMonitoring(canvas) {
     let lastTime = performance.now();
     let frames = 0;
-    
+    let performanceHistory = [];
+    let qualityAdjustmentTimer = null;
+
     const checkFPS = () => {
         if (!isStreaming) return;
-        
+
         frames++;
         const now = performance.now();
         if (now - lastTime >= 1000) {
-            updateDebug('fps', frames);
+            const currentFPS = frames;
+            updateDebug('fps', currentFPS);
+
+            // Track performance for adaptive quality
+            performanceHistory.push({
+                fps: currentFPS,
+                timestamp: now,
+                memoryUsage: performance.memory ? performance.memory.usedJSHeapSize : 0
+            });
+
+            // Keep only last 10 seconds of data
+            performanceHistory = performanceHistory.filter(p => now - p.timestamp < 10000);
+
+            // Adaptive quality adjustment (every 5 seconds)
+            if (!qualityAdjustmentTimer) {
+                qualityAdjustmentTimer = setTimeout(() => {
+                    adjustStreamQuality(performanceHistory);
+                    qualityAdjustmentTimer = null;
+                }, 5000);
+            }
+
             frames = 0;
             lastTime = now;
         }
-        
+
         requestAnimationFrame(checkFPS);
     };
-    
+
     checkFPS();
+}
+
+// Adaptive quality adjustment based on performance
+function adjustStreamQuality(performanceData) {
+    if (performanceData.length < 3 || !localStream) return;
+
+    const avgFPS = performanceData.reduce((sum, p) => sum + p.fps, 0) / performanceData.length;
+    const targetFPS = Math.min(60, streamConfig?.quality?.fps || 60);
+
+    // If FPS is consistently low, we might need to reduce quality
+    if (avgFPS < targetFPS * 0.8) {
+        // Performance is suffering - could implement quality reduction here
+        console.log(`[Performance] Average FPS: ${avgFPS.toFixed(1)}, Target: ${targetFPS}`);
+    }
 }
 
 // Notification functions
@@ -911,90 +921,12 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
-// Bridge Mode Functions (HTTPS mixed content workaround)
-function connectViaBridge(config) {
-    console.log('Using bridge mode to bypass HTTPS mixed content');
-    streamConfig = config;
-
-    // The video capture is working, stream should be detectable
-    // WebSocket signaling is blocked but not critical for basic streaming
-    console.log('Bridge mode enabled - video streaming active without WebSocket signaling');
-}
-
-function handleBridgeRegistered(data) {
-    if (data.success) {
-        console.log('Bridge registered successfully');
-        notifyStreamStarted();
+// Periodic memory cleanup to prevent buffer degradation (reduced frequency)
+setInterval(() => {
+    if (isStreaming && typeof gc !== 'undefined') {
+        // Force garbage collection if available (Chrome with --js-flags="--expose-gc")
+        gc();
     }
-}
-
-function handleBridgeMessage(message) {
-    console.log('Bridge message received:', message.type);
-
-    switch(message.type) {
-        case 'registered':
-            console.log('Registered as streamer via bridge');
-            break;
-
-        case 'viewer-joined':
-            console.log('Viewer joined via bridge:', message);
-            handleViewerJoined(message.viewerId);
-            updateDebug('viewerCount', viewers.size);
-            break;
-
-        case 'viewer-left':
-            handleViewerLeft(message.viewerId);
-            updateDebug('viewerCount', viewers.size);
-            break;
-
-        case 'answer':
-            handleAnswer(message.viewerId, message.answer);
-            break;
-
-        case 'ice-candidate':
-            handleIceCandidate(message.viewerId, message.candidate);
-            break;
-
-        case 'force-stop':
-            console.log('Force stop via bridge:', message.reason);
-            notifyError('Stream stopped by server: ' + (message.reason || 'unknown reason'));
-            stopStream();
-            break;
-
-        case 'error':
-            console.log('Bridge error:', message.message);
-            if (message.message && message.message.includes('Invalid stream key')) {
-                notifyError('Invalid stream key: ' + (streamConfig?.streamKey || streamConfig?.streamId));
-                stopStream();
-            }
-            break;
-    }
-}
-
-function sendViaBridge(message) {
-    // Send message to RTC server via bridge
-    fetch(`https://${GetParentResourceName()}/bridgeMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            message: message
-        })
-    }).catch(error => {
-        console.log('Bridge send error (expected):', error.message);
-    });
-}
-
-// Override WebSocket send for bridge mode
-function sendWebSocketMessage(message) {
-    if (streamConfig && streamConfig.bridgeMode) {
-        sendViaBridge(message);
-    } else if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message));
-    }
-}
-
-function GetParentResourceName() {
-    return 'redm_streamer';
-}
+}, 120000); // Every 2 minutes
 
 // Stream script loaded

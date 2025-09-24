@@ -2,7 +2,7 @@
 const activeStreams = new Map();
 
 // Listen for streamplayer command from Lua
-onNet("redm_streamer:createStream", (data) => {
+onNet("redm_utk_streamer:createStream", (data) => {
     const { streamId, targetPlayerId, commandSource } = data;
     
     console.log(`Creating utk_render stream: ${streamId} for player ${targetPlayerId}`);
@@ -29,7 +29,7 @@ onNet("redm_streamer:createStream", (data) => {
     
     // Notify command source of success
     if (commandSource > 0) {
-        emitNet("redm_streamer:notify", commandSource, `Stream created: ${streamId}`);
+        emitNet("redm_utk_streamer:notify", commandSource, `Stream created: ${streamId}`);
     }
 });
 
