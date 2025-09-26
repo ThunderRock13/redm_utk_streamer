@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
 const http = require('http');
+const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
@@ -9,8 +10,41 @@ const turn = require('node-turn');
 require('dotenv').config();
 
 const app = express();
-const server = http.createServer(app);
+
+// Try to create HTTPS server if SSL files exist, otherwise use HTTP
+let server;
+let httpsServer;
+let useSSL = false;
+
+try {
+    // Check for SSL certificate files
+    const sslPath = path.join(__dirname, 'ssl');
+    const keyPath = path.join(sslPath, 'key.pem');
+    const certPath = path.join(sslPath, 'cert.pem');
+
+    if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+        const options = {
+            key: fs.readFileSync(keyPath),
+            cert: fs.readFileSync(certPath),
+            // CFX-friendly SSL options
+            rejectUnauthorized: false,
+            requestCert: false,
+            agent: false,
+            secureProtocol: 'TLSv1_2_method'
+        };
+
+        httpsServer = https.createServer(options, app);
+        useSSL = true;
+        console.log('🔒 SSL certificates found - HTTPS enabled with CFX compatibility');
+    }
+} catch (error) {
+    console.log('⚠️ SSL setup failed, falling back to HTTP only:', error.message);
+}
+
+// Always create HTTP server as fallback
+server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
+const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 const TURN_PORT = process.env.TURN_PORT || 3478;
 const API_KEY = process.env.API_KEY || 'redm-media-server-key-2024';
 
@@ -30,8 +64,22 @@ const turnServer = new turn({
     relayPortRange: '49152-65535'
 });
 
-// Middleware
-app.use(cors());
+// Middleware with CFX-specific headers
+app.use(cors({
+    origin: true,
+    credentials: true
+}));
+
+// Allow mixed content for CFX clients
+app.use((req, res, next) => {
+    res.header('Content-Security-Policy', "upgrade-insecure-requests");
+    res.header('X-Content-Type-Options', 'nosniff');
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Length, X-Requested-With');
+    next();
+});
+
 app.use(express.json());
 app.use('/player', express.static(path.join(__dirname, 'public')));
 
@@ -43,11 +91,21 @@ app.get('/monitor', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
 });
 
-// WebSocket server for WebRTC signaling
-const wss = new WebSocket.Server({ 
+
+// WebSocket server for WebRTC signaling (HTTP)
+const wss = new WebSocket.Server({
     server,
     path: '/ws'
 });
+
+// WebSocket server for HTTPS (if SSL enabled)
+let wssSecure;
+if (useSSL && httpsServer) {
+    wssSecure = new WebSocket.Server({
+        server: httpsServer,
+        path: '/ws'
+    });
+}
 
 // Store active streams and connections
 const activeStreams = new Map();
@@ -72,6 +130,231 @@ const authenticateAPI = (req, res, next) => {
     }
     next();
 };
+
+// WebSocket Proxy Endpoints for CFX RedM Server Integration
+const proxyConnections = new Map(); // playerId -> connection info
+const proxyMessageQueues = new Map(); // playerId -> message queue
+
+// Helper function to send messages to proxy connections
+function sendMessageToProxyConnection(playerId, message) {
+    const connection = proxyConnections.get(parseInt(playerId));
+    if (!connection || !connection.connected) {
+        console.log(`[WebSocket Proxy] Cannot send message to player ${playerId} - not connected`);
+        return false;
+    }
+
+    // Add message to queue
+    if (!proxyMessageQueues.has(parseInt(playerId))) {
+        proxyMessageQueues.set(parseInt(playerId), []);
+    }
+    proxyMessageQueues.get(parseInt(playerId)).push({
+        ...message,
+        timestamp: Date.now()
+    });
+
+    console.log(`[WebSocket Proxy] Queued message for player ${playerId}: ${message.type}`);
+    return true;
+}
+
+// Helper function to check if a stream has a proxy connection
+function isProxyConnection(stream) {
+    // Check if any proxy connection has this stream ID
+    for (const [playerId, connection] of proxyConnections.entries()) {
+        if (connection.streamId === stream.streamId || connection.streamKey === stream.streamKey) {
+            return { playerId, connection };
+        }
+    }
+    return null;
+}
+
+// Handle WebSocket connection from RedM server
+app.post('/api/websocket/connect', authenticateAPI, (req, res) => {
+    const { playerId, streamKey, streamId, playerName } = req.body;
+
+    console.log(`[WebSocket Proxy] Connection request from player ${playerName} (${playerId})`);
+
+    proxyConnections.set(playerId, {
+        playerId,
+        streamKey,
+        streamId,
+        playerName,
+        connected: true,
+        lastActivity: Date.now()
+    });
+
+    res.json({
+        status: 'connected',
+        playerId,
+        streamKey,
+        message: 'WebSocket proxy connection established'
+    });
+});
+
+// Handle WebSocket message from RedM server
+app.post('/api/websocket/message', authenticateAPI, (req, res) => {
+    const { playerId, message } = req.body;
+    const connection = proxyConnections.get(parseInt(playerId));
+
+    if (!connection) {
+        return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    // Update last activity
+    connection.lastActivity = Date.now();
+
+    // Process the WebSocket message as if it came from a real WebSocket
+    try {
+        const parsedMessage = typeof message === 'string' ? JSON.parse(message) : message;
+
+        // Handle different message types
+        let response = null;
+
+        switch (parsedMessage.type) {
+            case 'register-streamer':
+                // Register the streamer
+                connections.set(playerId, {
+                    id: playerId,
+                    type: 'streamer',
+                    streamKey: parsedMessage.streamKey,
+                    playerName: connection.playerName,
+                    proxy: true // Mark as proxy connection
+                });
+                response = { type: 'registered', streamKey: parsedMessage.streamKey };
+                console.log(`[WebSocket Proxy] Streamer ${connection.playerName} registered via proxy`);
+
+                // Check for existing viewers and notify them about the streamer coming online
+                const streamKey = parsedMessage.streamKey;
+                console.log(`[WebSocket Proxy] Checking for existing viewers for stream ${streamKey}`);
+                console.log(`[WebSocket Proxy] Current viewers Map:`, Array.from(viewers.entries()));
+                console.log(`[WebSocket Proxy] Current connections:`, Array.from(connections.entries()).map(([id, conn]) => ({ id, type: conn.type, streamKey: conn.streamKey, panelId: conn.panelId })));
+
+                // Count existing viewers for this stream key
+                let existingViewerCount = 0;
+                for (const [viewerClientId, viewerStreamKey] of viewers.entries()) {
+                    if (viewerStreamKey === streamKey) {
+                        existingViewerCount++;
+                        const viewerConnection = connections.get(viewerClientId);
+
+                        const viewerJoinedMessage = {
+                            type: 'viewer-joined',
+                            viewerId: viewerClientId,
+                            panelId: viewerConnection ? (viewerConnection.panelId || 0) : 0
+                        };
+
+                        sendMessageToProxyConnection(playerId, viewerJoinedMessage);
+                        console.log(`[WebSocket Proxy] Notified proxy streamer about existing viewer ${viewerClientId} (panel ${viewerJoinedMessage.panelId})`);
+                    }
+                }
+
+                if (existingViewerCount > 0) {
+                    console.log(`[WebSocket Proxy] Found ${existingViewerCount} existing viewers for stream ${streamKey}`);
+                } else {
+                    console.log(`[WebSocket Proxy] No existing viewers found for stream ${streamKey}`);
+                }
+                break;
+
+            case 'offer':
+                // Handle WebRTC offer
+                console.log(`[WebSocket Proxy] Received offer from ${connection.playerName}`);
+                response = { type: 'offer-received' };
+                break;
+
+            case 'answer':
+                // Handle WebRTC answer
+                console.log(`[WebSocket Proxy] Received answer from ${connection.playerName}`);
+                response = { type: 'answer-received' };
+                break;
+
+            case 'ice-candidate':
+                // Handle ICE candidate
+                console.log(`[WebSocket Proxy] Received ICE candidate from ${connection.playerName}`);
+                response = { type: 'ice-candidate-received' };
+                break;
+
+            default:
+                console.log(`[WebSocket Proxy] Unknown message type: ${parsedMessage.type}`);
+                response = { type: 'unknown', message: 'Message type not recognized' };
+        }
+
+        // Get queued messages for this player
+        const playerId_int = parseInt(playerId);
+        const queuedMessages = proxyMessageQueues.get(playerId_int) || [];
+
+        // Clear the queue after retrieving messages
+        if (queuedMessages.length > 0) {
+            proxyMessageQueues.set(playerId_int, []);
+            console.log(`[WebSocket Proxy] Delivering ${queuedMessages.length} queued messages to player ${playerId}`);
+        }
+
+        res.json({
+            status: 'processed',
+            reply: response,
+            messages: queuedMessages // Include queued messages in response
+        });
+
+    } catch (error) {
+        console.error(`[WebSocket Proxy] Error processing message:`, error);
+        res.status(400).json({ error: 'Invalid message format' });
+    }
+});
+
+// Polling endpoint for proxy connections to check for messages
+app.post('/api/websocket/poll', authenticateAPI, (req, res) => {
+    const { playerId } = req.body;
+    const connection = proxyConnections.get(parseInt(playerId));
+
+    if (!connection) {
+        return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    // Update last activity
+    connection.lastActivity = Date.now();
+
+    // Get queued messages for this player
+    const playerId_int = parseInt(playerId);
+    const queuedMessages = proxyMessageQueues.get(playerId_int) || [];
+
+    // Clear the queue after retrieving messages
+    if (queuedMessages.length > 0) {
+        proxyMessageQueues.set(playerId_int, []);
+        console.log(`[WebSocket Proxy] Poll: Delivering ${queuedMessages.length} queued messages to player ${playerId}`);
+    }
+
+    res.json({
+        status: 'ok',
+        messages: queuedMessages
+    });
+});
+
+// Handle WebSocket disconnection from RedM server
+app.post('/api/websocket/disconnect', authenticateAPI, (req, res) => {
+    const { playerId, streamKey } = req.body;
+    const connection = proxyConnections.get(parseInt(playerId));
+
+    if (connection) {
+        console.log(`[WebSocket Proxy] Player ${connection.playerName} disconnected`);
+        proxyConnections.delete(parseInt(playerId));
+        connections.delete(parseInt(playerId));
+    }
+
+    res.json({ status: 'disconnected' });
+});
+
+// Clean up inactive proxy connections
+setInterval(() => {
+    const now = Date.now();
+    const timeout = 5 * 60 * 1000; // 5 minutes
+
+    for (const [playerId, connection] of proxyConnections.entries()) {
+        if (now - connection.lastActivity > timeout) {
+            console.log(`[WebSocket Proxy] Cleaning up inactive connection for player ${connection.playerName}`);
+            proxyConnections.delete(playerId);
+            connections.delete(playerId);
+        }
+    }
+}, 60000); // Check every minute
+
+console.log('🔗 WebSocket proxy endpoints initialized');
 
 // WebSocket API key validation
 const validateWSApiKey = (data) => {
@@ -98,7 +381,8 @@ app.post('/api/streams/create', authenticateAPI, (req, res) => {
     }
     
     const streamKey = uuidv4();
-    const webSocketUrl = `ws://localhost:${PORT}/ws`;
+    const serverHost = req.get('host') ? req.get('host').split(':')[0] : 'localhost';
+    const webSocketUrl = `ws://${serverHost}:${PORT}/ws`;
     const viewerUrl = `http://localhost:${PORT}/player/viewer.html?stream=${streamKey}`;
     
     activeStreams.set(streamId, {
@@ -254,9 +538,98 @@ app.post('/api/monitor/stream-started', authenticateAPI, (req, res) => {
     res.json({ success: true });
 });
 
+// WebRTC Data Relay Endpoint (for CFX-native streaming)
+app.post('/api/webrtc/relay', authenticateAPI, (req, res) => {
+    const { playerId, streamKey, messageType, messageData, viewerId, timestamp } = req.body;
+
+    console.log(`[WebRTC Relay] ${messageType} from player ${playerId} to viewer ${viewerId || 'broadcast'}`);
+
+    // Find the stream
+    let targetStream = null;
+    for (const [id, stream] of activeStreams) {
+        if (stream.streamKey === streamKey) {
+            targetStream = stream;
+            break;
+        }
+    }
+
+    if (!targetStream) {
+        return res.status(404).json({ error: 'Stream not found' });
+    }
+
+    let response = { status: 'relayed' };
+    let forwardTo = [];
+
+    // Handle different WebRTC message types
+    switch (messageType) {
+        case 'register-streamer':
+            // Streamer registering via pure events
+            console.log(`[WebRTC Relay] Streamer ${playerId} registered for stream ${streamKey}`);
+            response.reply = { type: 'registered', streamKey: streamKey };
+
+            // Notify existing viewers about streamer
+            targetStream.viewerWsList.forEach(viewerWs => {
+                if (viewerWs.readyState === WebSocket.OPEN) {
+                    forwardTo.push({
+                        playerId: viewerId, // This would need to be tracked
+                        message: { type: 'streamer-ready', streamKey: streamKey }
+                    });
+                }
+            });
+            break;
+
+        case 'offer':
+            // Forward offer to specific viewer
+            console.log(`[WebRTC Relay] Forwarding offer to viewer ${viewerId}`);
+            if (viewerId) {
+                forwardTo.push({
+                    playerId: viewerId,
+                    message: messageData
+                });
+            }
+            break;
+
+        case 'answer':
+            // Forward answer to streamer
+            console.log(`[WebRTC Relay] Forwarding answer from viewer ${playerId}`);
+            forwardTo.push({
+                playerId: targetStream.playerId, // Forward to streamer
+                message: messageData
+            });
+            break;
+
+        case 'ice-candidate':
+            // Forward ICE candidate
+            console.log(`[WebRTC Relay] Forwarding ICE candidate`);
+            if (viewerId) {
+                forwardTo.push({
+                    playerId: viewerId,
+                    message: messageData
+                });
+            } else {
+                // Forward to streamer
+                forwardTo.push({
+                    playerId: targetStream.playerId,
+                    message: messageData
+                });
+            }
+            break;
+
+        default:
+            console.log(`[WebRTC Relay] Unknown message type: ${messageType}`);
+    }
+
+    // Include forwarding instructions
+    if (forwardTo.length > 0) {
+        response.forwardTo = forwardTo;
+    }
+
+    res.json(response);
+});
+
 // Endpoint to get WebRTC configuration (ICE servers, TURN settings)
 app.get('/api/webrtc/config', (req, res) => {
-    const turnEnabled = process.env.TURN_ENABLED === 'true'; // Enable TURN based on environment
+    const turnEnabled = process.env.TURN_ENABLED !== 'false'; // Enable TURN by default
     const forceRelayOnly = process.env.FORCE_RELAY_ONLY === 'true';
 
     const iceServers = [
@@ -283,9 +656,12 @@ app.get('/api/webrtc/config', (req, res) => {
         iceTransportPolicy: forceRelayOnly ? 'relay' : 'all',
         turnEnabled: turnEnabled,
         forceRelayOnly: forceRelayOnly,
-        iceCandidatePoolSize: 0, // Prevent ICE candidate gathering to avoid firewall prompts
-        bundlePolicy: 'balanced', // Use balanced bundle policy
-        rtcpMuxPolicy: 'require' // Force RTCP multiplexing to reduce port usage
+        iceCandidatePoolSize: 10, // Enable ICE candidate pool for better remote connectivity
+        bundlePolicy: 'balanced',
+        rtcpMuxPolicy: 'require',
+        // Additional settings for remote connectivity
+        iceConnectionTimeout: 30000, // 30 seconds timeout
+        iceGatheringTimeout: 10000   // 10 seconds for gathering
     };
 
 
@@ -330,7 +706,7 @@ app.post('/webrtc/offer', async (req, res) => {
     res.json({
         success: true,
         message: 'Connect via WebSocket to complete setup',
-        webSocketUrl: `ws://localhost:${PORT}/ws`
+        webSocketUrl: `ws://${req.get('host') ? req.get('host').split(':')[0] : 'localhost'}:${PORT}/ws`
     });
     
 
@@ -906,23 +1282,32 @@ function handleViewerRegistration(clientId, ws, data) {
 
 
 
+        // Check if streamer is connected via WebSocket or proxy
+        const proxyInfo = isProxyConnection(stream);
+
         if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
-        const viewerMessage = {
-            type: 'viewer-joined',
-            viewerId: clientId,
-            panelId: panelId  // Include panelId in viewer-joined message
-        };
-
-
-        stream.streamerWs.send(JSON.stringify(viewerMessage));
-
-
-    } else {
-
-
+            // Direct WebSocket connection
+            const viewerMessage = {
+                type: 'viewer-joined',
+                viewerId: clientId,
+                panelId: panelId
+            };
+            stream.streamerWs.send(JSON.stringify(viewerMessage));
+            console.log(`[WebSocket] Sent viewer-joined to streamer via WebSocket`);
+        } else if (proxyInfo) {
+            // Proxy connection - queue the message
+            const viewerMessage = {
+                type: 'viewer-joined',
+                viewerId: clientId,
+                panelId: panelId
+            };
+            sendMessageToProxyConnection(proxyInfo.playerId, viewerMessage);
+            console.log(`[WebSocket Proxy] Sent viewer-joined to streamer via proxy`);
+        } else {
 
         // Check if this is a timing issue - maybe streamer is registering
         setTimeout(() => {
+            const retryProxyInfo = isProxyConnection(stream);
 
             if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
                 const retryMessage = {
@@ -930,11 +1315,18 @@ function handleViewerRegistration(clientId, ws, data) {
                     viewerId: clientId,
                     panelId: panelId
                 };
-
                 stream.streamerWs.send(JSON.stringify(retryMessage));
-
+                console.log(`[WebSocket] Retry - sent viewer-joined to streamer via WebSocket`);
+            } else if (retryProxyInfo) {
+                const retryMessage = {
+                    type: 'viewer-joined',
+                    viewerId: clientId,
+                    panelId: panelId
+                };
+                sendMessageToProxyConnection(retryProxyInfo.playerId, retryMessage);
+                console.log(`[WebSocket Proxy] Retry - sent viewer-joined to streamer via proxy`);
             } else {
-
+                console.log(`[WebSocket] Retry - streamer still not available`);
             }
         }, 2000);
         }
@@ -955,12 +1347,22 @@ function handleViewerRegistration(clientId, ws, data) {
             }));
 
             // Notify streamer if available
+            const secondaryProxyInfo = isProxyConnection(stream);
+
             if (stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
                 stream.streamerWs.send(JSON.stringify({
                     type: 'viewer-joined',
                     viewerId: clientId,
                     panelId: panelId
                 }));
+                console.log(`[WebSocket] Sent viewer-joined to secondary viewer via WebSocket`);
+            } else if (secondaryProxyInfo) {
+                sendMessageToProxyConnection(secondaryProxyInfo.playerId, {
+                    type: 'viewer-joined',
+                    viewerId: clientId,
+                    panelId: panelId
+                });
+                console.log(`[WebSocket Proxy] Sent viewer-joined to secondary viewer via proxy`);
             }
         } else {
             // This is a secondary viewer - add them to shared viewers
@@ -1504,30 +1906,83 @@ function handleWSStreamFrame(clientId, ws, data) {
     });
 }
 
-// Start server
+// Start servers
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Media server running on port ${PORT}`);
+    console.log(`🚀 HTTP server running on port ${PORT}`);
     console.log(`📡 Monitor: http://0.0.0.0:${PORT}/monitor`);
-
-    // Start TURN server if enabled
-    if (process.env.TURN_ENABLED === 'true') {
-        try {
-            turnServer.start();
-            console.log(`🔄 TURN server started on port ${TURN_PORT} for remote WebRTC access`);
-        } catch (error) {
-            console.error('❌ Failed to start TURN server:', error);
-        }
-    } else {
-        console.log('⚠️ TURN server disabled - WebRTC may not work for remote clients');
-    }
 });
+
+// Start HTTPS server if SSL is available
+if (useSSL && httpsServer) {
+    httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+        console.log(`🔒 HTTPS server running on port ${HTTPS_PORT}`);
+        console.log(`🛡️ Secure Monitor: https://0.0.0.0:${HTTPS_PORT}/monitor`);
+    });
+
+    // Handle HTTPS WebSocket connections with the same logic as HTTP
+    if (wssSecure) {
+        wssSecure.on('connection', (ws, req) => {
+            const clientId = uuidv4();
+            console.log(`🔒 Secure WebSocket client connected: ${clientId}`);
+
+            connections.set(clientId, {
+                ws: ws,
+                role: null,
+                streamKey: null,
+                lastPing: Date.now()
+            });
+
+            // Handle the connection using the existing WebSocket message handler
+            ws.on('message', (message) => {
+                try {
+                    const data = JSON.parse(message);
+                    handleWebSocketMessage(clientId, ws, data);
+                } catch (error) {
+                    // Message parsing error
+                }
+            });
+
+            ws.on('close', () => {
+                console.log(`🔒 Secure WebSocket client disconnected: ${clientId}`);
+                handleDisconnect(clientId);
+            });
+
+            ws.on('error', (error) => {
+                console.error(`🔒 Secure WebSocket error for ${clientId}:`, error);
+                handleDisconnect(clientId);
+            });
+        });
+    }
+}
+
+// Start TURN server by default for better remote connectivity
+const enableTurn = process.env.TURN_ENABLED !== 'false'; // Default to true
+if (enableTurn) {
+    try {
+        turnServer.start();
+        console.log(`🔄 TURN server started on port ${TURN_PORT} for remote WebRTC access`);
+    } catch (error) {
+        console.error('❌ Failed to start TURN server:', error);
+        console.log('⚠️ WebRTC may not work for remote clients without TURN server');
+    }
+} else {
+    console.log('⚠️ TURN server disabled - WebRTC may not work for remote clients');
+}
+
+// SSL certificate generation hint
+if (!useSSL) {
+    console.log('💡 To enable HTTPS/WSS (needed for CFX NUI):');
+    console.log('   Run: node generate-ssl.js');
+    console.log('   Then restart the server');
+}
 
 // Handle shutdown
 process.on('SIGINT', () => {
     console.log('\n🛑 Shutting down server...');
 
     // Stop TURN server if running
-    if (process.env.TURN_ENABLED === 'true') {
+    const enableTurn = process.env.TURN_ENABLED !== 'false';
+    if (enableTurn) {
         try {
             turnServer.stop();
             console.log('🔄 TURN server stopped');

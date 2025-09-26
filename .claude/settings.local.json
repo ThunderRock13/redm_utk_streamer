@@ -12,7 +12,10 @@
       "Bash(npm start)",
       "Bash(netstat:*)",
       "Bash(tasklist)",
-      "Bash(tasklist:*)"
+      "Bash(tasklist:*)",
+      "Bash(openssl:*)",
+      "Bash(node:*)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": []

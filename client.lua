@@ -18,16 +18,28 @@ AddEventHandler('redm_utk_streamer:startStream', function(config)
     -- Make sure NUI is ready
     Wait(1000)
     
-    -- Send configuration to NUI for direct streaming
+    -- Send configuration to NUI for proxy-based streaming
     local nuiMessage = {
         action = 'START_STREAM',
         streamId = config.streamId,
         streamKey = config.streamKey or config.streamId,
-        webSocketUrl = 'ws://localhost:3000/ws',
+        useProxy = true, -- Enable event-based proxy
         stunServer = 'stun:stun.l.google.com:19302',
         quality = Config.StreamQuality
     }
-    
+
+    -- Debug logging
+    if Config.Debug then
+        print(string.format("^2[Client Debug]^7 Starting stream with proxy mode"))
+        print(string.format("^2[Client Debug]^7 Stream ID: %s, Stream Key: %s", nuiMessage.streamId, nuiMessage.streamKey))
+    end
+
+    -- Initialize proxy connection
+    TriggerServerEvent('redm_utk_streamer:connectWebSocket', {
+        streamId = config.streamId,
+        streamKey = config.streamKey or config.streamId
+    })
+
     SendNUIMessage(nuiMessage)
     
     -- Show notification
@@ -62,11 +74,14 @@ AddEventHandler('redm_utk_streamer:stopStream', function()
     currentStreamId = nil
     streamConfig = nil
     
+    -- Disconnect proxy
+    TriggerServerEvent('redm_utk_streamer:disconnectWebSocket')
+
     -- Tell NUI to stop
     SendNUIMessage({
         action = 'STOP_STREAM'
     })
-    
+
     ShowNotification("~r~Stream Stopped~s~")
 end)
 
@@ -91,7 +106,7 @@ end)
 
 -- NUI Callbacks
 RegisterNUICallback('streamStarted', function(data, cb)
-    
+
     -- Notify server that stream is ready
     TriggerServerEvent('redm_utk_streamer:updateStats', {
         status = 'connected',
@@ -99,7 +114,21 @@ RegisterNUICallback('streamStarted', function(data, cb)
         streamKey = data.streamKey,
         timestamp = GetGameTimer()
     })
-    
+
+    cb('ok')
+end)
+
+-- Handle WebRTC data relay (CFX-native, no HTTP)
+RegisterNUICallback('sendWebRTCData', function(data, cb)
+    -- Relay WebRTC data (offers, answers, ICE candidates) through server events
+    TriggerServerEvent('redm_utk_streamer:relayWebRTCData', {
+        streamId = currentStreamId,
+        streamKey = streamConfig and streamConfig.streamKey,
+        messageType = data.type,
+        messageData = data.data,
+        viewerId = data.viewerId,
+        timestamp = GetGameTimer()
+    })
     cb('ok')
 end)
 
@@ -162,7 +191,7 @@ RegisterCommand('teststream', function()
         local testConfig = {
             streamId = 'test_' .. GetGameTimer(),
             streamKey = 'test_key_' .. GetGameTimer(),
-            webSocketUrl = 'ws://localhost:3000/ws',
+            webSocketUrl = 'ws://' .. Config.MediaServer.server_ip .. ':3000/ws',
             stunServer = 'stun:stun.l.google.com:19302',
             quality = Config.StreamQuality
         }
@@ -188,11 +217,11 @@ AddEventHandler('onResourceStop', function(resourceName)
     end
 end)
 
--- Heartbeat to keep stream alive
+-- Heartbeat to keep stream alive and poll for proxy messages
 CreateThread(function()
     while true do
         Wait(30000) -- Every 30 seconds
-        
+
         if isStreaming and currentStreamId then
             TriggerServerEvent('redm_utk_streamer:updateStats', {
                 status = 'heartbeat',
@@ -200,6 +229,9 @@ CreateThread(function()
                 timestamp = GetGameTimer(),
                 uptime = GetGameTimer()
             })
+
+            -- Also poll for proxy messages
+            TriggerServerEvent('redm_utk_streamer:pollProxyMessages')
         end
     end
 end)
@@ -210,6 +242,26 @@ function ShowNotification(text)
     Citizen.InvokeNative(0xFA233F8FE190514C, str)
     Citizen.InvokeNative(0xE9990552DEC71600)
 end
+
+-- Handle WebRTC replies from server
+RegisterNetEvent('redm_utk_streamer:webRTCReply')
+AddEventHandler('redm_utk_streamer:webRTCReply', function(replyData)
+    -- Forward WebRTC reply to NUI
+    SendNUIMessage({
+        action = 'WEBRTC_REPLY',
+        data = replyData
+    })
+end)
+
+-- Handle WebRTC messages from other clients
+RegisterNetEvent('redm_utk_streamer:webRTCMessage')
+AddEventHandler('redm_utk_streamer:webRTCMessage', function(messageData)
+    -- Forward WebRTC message to NUI
+    SendNUIMessage({
+        action = 'WEBRTC_MESSAGE',
+        data = messageData
+    })
+end)
 
 -- Export functions for other resources
 function StartStreamingExport(playerId)
@@ -235,6 +287,60 @@ function GetStreamStatusExport()
         config = streamConfig
     }
 end
+
+-- WebSocket Proxy Event Handlers
+
+-- Proxy connected successfully
+RegisterNetEvent('redm_utk_streamer:webSocketConnected')
+AddEventHandler('redm_utk_streamer:webSocketConnected', function(data)
+    if Config.Debug then
+        print("^2[Client Debug]^7 WebSocket proxy connected successfully")
+    end
+
+    -- Notify NUI that proxy is connected
+    SendNUIMessage({
+        action = 'PROXY_CONNECTED',
+        data = data
+    })
+end)
+
+-- Proxy connection error
+RegisterNetEvent('redm_utk_streamer:webSocketError')
+AddEventHandler('redm_utk_streamer:webSocketError', function(error)
+    if Config.Debug then
+        print("^1[Client Debug]^7 WebSocket proxy error: " .. (error.message or "unknown"))
+    end
+
+    -- Notify NUI of error
+    SendNUIMessage({
+        action = 'PROXY_ERROR',
+        error = error
+    })
+end)
+
+-- Message from WebRTC server via proxy
+RegisterNetEvent('redm_utk_streamer:webSocketMessage')
+AddEventHandler('redm_utk_streamer:webSocketMessage', function(message)
+    if Config.Debug then
+        print("^2[Client Debug]^7 Received message via proxy")
+    end
+
+    -- Forward to NUI
+    SendNUIMessage({
+        action = 'PROXY_MESSAGE',
+        message = message
+    })
+end)
+
+-- NUI Callback for sending messages via proxy
+RegisterNUICallback('sendProxyMessage', function(data, cb)
+    if Config.Debug then
+        print("^2[Client Debug]^7 Sending message via proxy: " .. (data.type or "unknown"))
+    end
+
+    TriggerServerEvent('redm_utk_streamer:sendWebSocketMessage', data)
+    cb('ok')
+end)
 
 -- Exports
 exports('startStreaming', StartStreamingExport)

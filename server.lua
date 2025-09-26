@@ -34,6 +34,13 @@ local heartbeatFailures = 0
 CreateThread(function()
     Wait(5000)
 
+    -- Send initial player list immediately on startup, don't wait for connection
+    print("^2[RedM Streamer]^7 Sending initial player list...")
+    CreateThread(function()
+        Wait(2000) -- Small delay to let server start
+        ForcePlayerListUpdate()
+    end)
+
     local function attemptConnection()
         CallMediaServer("/health", "GET", nil, function(success, data)
             if success then
@@ -186,7 +193,7 @@ function HandleStreamRequest(request)
     TriggerClientEvent('redm_utk_streamer:startStream', playerId, {
         streamId = streamId,
         streamKey = streamKey,
-        webSocketUrl = 'ws://localhost:3000/ws',
+        webSocketUrl = 'ws://' .. Config.MediaServer.server_ip .. ':3000/ws',
         stunServer = 'stun:stun.l.google.com:19302'
     })
     
@@ -244,7 +251,7 @@ end
 
 CreateThread(function()
     while true do
-        Wait(5000) -- Increased frequency: every 5 seconds for better responsiveness
+        Wait(3000) -- More frequent: every 3 seconds for better responsiveness
 
         -- Build lightweight player list - avoid expensive operations
         local players = {}
@@ -270,26 +277,46 @@ CreateThread(function()
             table.insert(streamingStates, p.streaming and "1" or "0")
         end
         local simpleHash = #players .. ":" .. table.concat(streamingStates, ",")
+
+        -- Send updates more frequently - both when changed AND periodically
+        local shouldSend = false
+        local currentTime = os.time()
+
         if simpleHash ~= lastPlayerListHash then
+            shouldSend = true -- Send when changed
+        elseif (currentTime % 15) == 0 then -- Also send every 15 seconds regardless
+            shouldSend = true
+        end
+
+        if shouldSend then
             playerList = players
             lastPlayerListHash = simpleHash
 
-            -- Send minimal update (always send, even if empty, to keep connection alive)
+            -- Always attempt to send, regardless of connection status
             CallMediaServer("/players/update", "POST", {
                 players = players,
-                timestamp = os.time()
+                timestamp = currentTime
             }, function(success, data)
                 if Config.Debug then
                     print(string.format("^2[Player Update]^7 Sent %d players - Success: %s", #players, tostring(success)))
                 end
+
+                -- If successful and we weren't connected, mark as connected
+                if success and not mediaServerConnected then
+                    print("^2[RedM Streamer]^7 Connection restored via player update")
+                    mediaServerConnected = true
+                    reconnectAttempts = 0
+                    heartbeatFailures = 0
+                    lastConnectionTime = GetGameTimer()
+                end
             end)
         end
-        
+
         -- Clean up dead streams
         for playerId, stream in pairs(activeStreams) do
             if not GetPlayerName(playerId) then
                 print(string.format("^3[Cleanup]^7 Removing dead stream for disconnected player %d", playerId))
-                
+
                 -- Notify media server
                 CallMediaServer("/monitor/stream-ended", "POST", {
                     playerId = playerId,
@@ -297,7 +324,7 @@ CreateThread(function()
                     streamKey = stream.streamKey,
                     reason = "player_disconnected"
                 })
-                
+
                 activeStreams[playerId] = nil
             end
         end
@@ -359,7 +386,7 @@ AddEventHandler('redm_utk_streamer:requestStream', function(targetPlayerId, moni
                 streamId = streamId,
                 streamKey = data.streamKey,
                 webrtcUrl = data.webrtcEndpoint or 'http://localhost:3000/webrtc',
-                webSocketUrl = data.webSocketUrl or 'ws://localhost:3000/ws',
+                webSocketUrl = data.webSocketUrl or 'ws://' .. Config.MediaServer.server_ip .. ':3000/ws',
                 stunServer = data.stunServer,
                 turnServer = data.turnServer
             })
@@ -578,3 +605,175 @@ function GetTableLength(t)
     end
     return count
 end
+
+-- WebSocket Proxy using Events (CFX-compatible approach)
+-- Client connects via events instead of WebSocket to avoid SSL issues
+
+local clientConnections = {}
+local messageQueue = {}
+
+-- Client requests to connect to WebRTC server
+RegisterServerEvent('redm_utk_streamer:connectWebSocket')
+AddEventHandler('redm_utk_streamer:connectWebSocket', function(config)
+    local src = source
+    clientConnections[src] = {
+        playerId = src,
+        streamKey = config.streamKey,
+        streamId = config.streamId,
+        connected = false
+    }
+
+    -- Try to establish connection to WebRTC server on behalf of client
+    CallMediaServer("/websocket/connect", "POST", {
+        playerId = src,
+        streamKey = config.streamKey,
+        streamId = config.streamId,
+        playerName = GetPlayerName(src)
+    }, function(success, data)
+        if success then
+            clientConnections[src].connected = true
+            TriggerClientEvent('redm_utk_streamer:webSocketConnected', src, data)
+            print(string.format("^2[WebSocket Proxy]^7 Player %s connected to WebRTC server", GetPlayerName(src)))
+        else
+            TriggerClientEvent('redm_utk_streamer:webSocketError', src, {
+                error = "connection_failed",
+                message = "Could not connect to WebRTC server"
+            })
+            print(string.format("^1[WebSocket Proxy]^7 Failed to connect player %s to WebRTC server", GetPlayerName(src)))
+        end
+    end)
+end)
+
+-- Client sends WebSocket message
+RegisterServerEvent('redm_utk_streamer:sendWebSocketMessage')
+AddEventHandler('redm_utk_streamer:sendWebSocketMessage', function(message)
+    local src = source
+    local connection = clientConnections[src]
+
+    if connection and connection.connected then
+        -- Forward message to WebRTC server
+        CallMediaServer("/websocket/message", "POST", {
+            playerId = src,
+            message = message,
+            timestamp = os.time()
+        }, function(success, response)
+            if response and response.reply then
+                TriggerClientEvent('redm_utk_streamer:webSocketMessage', src, response.reply)
+            end
+
+            -- Process queued messages (viewer-joined, etc.)
+            if response and response.messages and #response.messages > 0 then
+                if Config.Debug then
+                    print(string.format("^2[Server Debug]^7 Processing %d queued messages for player %s", #response.messages, src))
+                end
+
+                for _, queuedMessage in ipairs(response.messages) do
+                    if Config.Debug then
+                        print(string.format("^2[Server Debug]^7 Forwarding queued message: %s", queuedMessage.type))
+                    end
+                    TriggerClientEvent('redm_utk_streamer:webSocketMessage', src, queuedMessage)
+                end
+            end
+        end)
+    else
+        TriggerClientEvent('redm_utk_streamer:webSocketError', src, {
+            error = "not_connected",
+            message = "WebSocket proxy not connected"
+        })
+    end
+end)
+
+-- Client polls for proxy messages
+RegisterServerEvent('redm_utk_streamer:pollProxyMessages')
+AddEventHandler('redm_utk_streamer:pollProxyMessages', function()
+    local src = source
+    local connection = clientConnections[src]
+
+    if connection and connection.connected then
+        -- Poll WebRTC server for messages
+        CallMediaServer("/websocket/poll", "POST", {
+            playerId = src
+        }, function(success, response)
+            if response and response.messages and #response.messages > 0 then
+                if Config.Debug then
+                    print(string.format("^2[Server Debug]^7 Poll: Processing %d queued messages for player %s", #response.messages, src))
+                end
+
+                for _, queuedMessage in ipairs(response.messages) do
+                    if Config.Debug then
+                        print(string.format("^2[Server Debug]^7 Poll: Forwarding queued message: %s", queuedMessage.type))
+                    end
+                    TriggerClientEvent('redm_utk_streamer:webSocketMessage', src, queuedMessage)
+                end
+            end
+        end)
+    end
+end)
+
+-- Client disconnects
+RegisterServerEvent('redm_utk_streamer:disconnectWebSocket')
+AddEventHandler('redm_utk_streamer:disconnectWebSocket', function()
+    local src = source
+    local connection = clientConnections[src]
+
+    if connection then
+        CallMediaServer("/websocket/disconnect", "POST", {
+            playerId = src,
+            streamKey = connection.streamKey
+        })
+
+        clientConnections[src] = nil
+        print(string.format("^3[WebSocket Proxy]^7 Player %s disconnected from WebRTC server", GetPlayerName(src)))
+    end
+end)
+
+-- Clean up disconnected players
+AddEventHandler('playerDropped', function()
+    local src = source
+    if clientConnections[src] then
+        CallMediaServer("/websocket/disconnect", "POST", {
+            playerId = src,
+            streamKey = clientConnections[src].streamKey
+        })
+        clientConnections[src] = nil
+    end
+end)
+
+-- CFX-Native WebRTC Data Relay (no HTTP, pure events)
+RegisterServerEvent('redm_utk_streamer:relayWebRTCData')
+AddEventHandler('redm_utk_streamer:relayWebRTCData', function(data)
+    local src = source
+    local connection = clientConnections[src]
+
+    if connection and connection.connected then
+        -- Forward WebRTC data to RTC server via media server API
+        CallMediaServer("/webrtc/relay", "POST", {
+            playerId = src,
+            streamKey = data.streamKey,
+            messageType = data.messageType,
+            messageData = data.messageData,
+            viewerId = data.viewerId,
+            timestamp = data.timestamp
+        }, function(success, response)
+            if response and response.reply then
+                -- Send reply back to client
+                TriggerClientEvent('redm_utk_streamer:webRTCReply', src, response.reply)
+            end
+
+            -- Forward any messages to other viewers
+            if response and response.forwardTo then
+                for _, targetData in ipairs(response.forwardTo) do
+                    if targetData.playerId ~= src then
+                        TriggerClientEvent('redm_utk_streamer:webRTCMessage', targetData.playerId, targetData.message)
+                    end
+                end
+            end
+        end)
+    else
+        if Config.Debug then
+            print(string.format("^1[WebRTC Relay]^7 Player %s not connected to proxy", src))
+        end
+    end
+end)
+
+print("^2[WebSocket Proxy]^7 Event-based WebSocket proxy initialized")

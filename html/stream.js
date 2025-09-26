@@ -1,13 +1,17 @@
 // WebRTC Streaming with proper utk_render integration
 let ws = null;
 let pc = null;
+let peerConnection = null; // For proxy mode peer connection
 let localStream = null;
 let streamConfig = null;
+let globalConfig = null; // For proxy mode configuration
+let pendingProxyConnection = null; // Store proxy connection data until ready
 let viewers = new Map();
 let reconnectTimer = null;
 let heartbeatTimer = null;
 let isStreaming = false;
 let renderStarted = false;
+let streamInitializationInProgress = false;
 
 // WebRTC Configuration (for firewall-free streaming)
 let webrtcConfig = null;
@@ -75,6 +79,47 @@ window.addEventListener('message', async (event) => {
         case 'STOP_STREAM':
             // STOP_STREAM received
             stopStream();
+            break;
+        case 'PROXY_CONNECTED':
+            console.log(`[Debug] ========== PROXY_CONNECTED EVENT ==========`);
+            console.log(`[Debug] globalConfig available: ${!!globalConfig}`);
+            console.log(`[Debug] Event data:`, data.data);
+
+            if (globalConfig && localStream) {
+                // Both globalConfig and localStream are ready, process immediately
+                console.log(`[Debug] globalConfig and localStream ready - processing proxy connection immediately`);
+                onProxyConnected(data.data);
+                console.log(`[Debug] onProxyConnected() call completed`);
+            } else {
+                // Store connection data for later processing (don't overwrite if already exists)
+                if (!pendingProxyConnection) {
+                    console.log(`[Debug] Storing proxy connection data - globalConfig: ${!!globalConfig}, localStream: ${!!localStream}`);
+                    pendingProxyConnection = data.data;
+                    console.log(`[Debug] Proxy connection data stored for later`);
+                } else {
+                    console.log(`[Debug] Proxy connection data already stored, ignoring duplicate`);
+                }
+            }
+            break;
+        case 'PROXY_ERROR':
+            console.error(`[Debug] Proxy connection error:`, data.error);
+            break;
+        case 'PROXY_MESSAGE':
+            console.log(`[Debug] Received WebRTC message via proxy`);
+            try {
+                handleWebRTCMessage(data.message);
+            } catch (error) {
+                console.error(`[Debug] Error handling WebRTC message:`, error);
+                console.error(`[Debug] Message data:`, data.message);
+            }
+            break;
+        case 'WEBRTC_REPLY':
+            console.log(`[Debug] Received WebRTC reply via CFX events`);
+            handleWebRTCMessage(data.data);
+            break;
+        case 'WEBRTC_MESSAGE':
+            console.log(`[Debug] Received WebRTC message via CFX events`);
+            handleWebRTCMessage(data.data);
             break;
     }
 });
@@ -286,27 +331,61 @@ class CfxGameViewRenderer {
 async function startStream(config) {
     // Starting stream
 
-    if (isStreaming) {
-        // Already streaming, stopping first
-        stopStream();
-        await new Promise(resolve => setTimeout(resolve, 1000));
+    // Validate config parameter
+    if (!config) {
+        console.error(`[Debug] startStream called with null/undefined config`);
+        return;
     }
 
-    // Load WebRTC configuration for firewall-free streaming
-    if (!webrtcConfig) {
-        await loadWebRTCConfig();
+    if (!config.streamId) {
+        console.error(`[Debug] startStream called with invalid config - missing streamId:`, config);
+        return;
     }
 
-    streamConfig = config;
-    isStreaming = true;
-    updateDebug('streamId', config.streamId);
+    // Prevent concurrent initialization
+    if (streamInitializationInProgress) {
+        console.log(`[Debug] Stream initialization already in progress, ignoring duplicate call`);
+        return;
+    }
+
+    // Prevent duplicate initialization for the same stream
+    if (isStreaming && streamConfig && streamConfig.streamId === config.streamId) {
+        console.log(`[Debug] Stream already running for ${config.streamId}, ignoring duplicate start`);
+        return;
+    }
+
+    streamInitializationInProgress = true;
+    console.log(`[Debug] ========== STARTING STREAM ==========`);
+    console.log(`[Debug] Stream ID: ${config.streamId}`);
+    console.log(`[Debug] Stream Key: ${config.streamKey}`);
+    console.log(`[Debug] Use Proxy: ${config.useProxy}`);
 
     try {
+        if (isStreaming) {
+            // Already streaming different stream, stopping first
+            console.log(`[Debug] Stopping existing stream before starting new one`);
+            stopStream();
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        // Load WebRTC configuration for firewall-free streaming
+        if (!webrtcConfig) {
+            await loadWebRTCConfig();
+        }
+
+        streamConfig = config;
+        isStreaming = true;
+        updateDebug('streamId', config.streamId);
+
+        try {
         // Get canvas
+        console.log(`[Debug] Looking for canvas element 'stream-canvas'`);
         const canvas = document.getElementById('stream-canvas');
         if (!canvas) {
+            console.error(`[Debug] Canvas element 'stream-canvas' not found in DOM`);
             throw new Error('Canvas element not found');
         }
+        console.log(`[Debug] Canvas found:`, canvas);
 
         // Set canvas size based on config - ensure pixel perfect rendering
         const width = config.quality?.width || 1920;
@@ -323,25 +402,33 @@ async function startStream(config) {
         canvas.style.width = width + 'px';
         canvas.style.height = height + 'px';
 
+        console.log(`[Debug] Creating CfxGameViewRenderer for canvas`);
         let MainRender = new CfxGameViewRenderer(canvas);
+        console.log(`[Debug] CfxGameViewRenderer created successfully`);
 
         // Resize the renderer to match the actual canvas dimensions
+        console.log(`[Debug] Resizing renderer to ${width * devicePixelRatio}x${height * devicePixelRatio}`);
         MainRender.resize(width * devicePixelRatio, height * devicePixelRatio);
+        console.log(`[Debug] Renderer resized successfully`);
 
         // Keep canvas hidden but available for capture
         canvas.style.visibility = 'hidden';
         canvas.style.display = 'block';
 
         // Wait for rendering to stabilize
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
+        console.log(`[Debug] Waiting 3 seconds for rendering to stabilize...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        console.log(`[Debug] Starting canvas capture...`);
+
         // Try different capture methods - don't interfere with WebGL context
         try {
             // Method 1: Direct canvas capture - WebGL handles quality internally
             const targetFPS = Math.min(60, config.quality?.fps || 60);
+            console.log(`[Debug] Attempting canvas.captureStream(${targetFPS})`);
             localStream = canvas.captureStream(targetFPS);
-            // Using canvas.captureStream at ${targetFPS} FPS
+            console.log(`[Debug] Canvas capture successful with captureStream`);
         } catch (e1) {
+            console.error(`[Debug] canvas.captureStream failed:`, e1);
             try {
                 // Method 2: Mozilla prefix
                 const targetFPS = Math.min(60, config.quality?.fps || 60);
@@ -354,10 +441,11 @@ async function startStream(config) {
         // Verify stream has tracks
         const videoTracks = localStream.getVideoTracks();
         const audioTracks = localStream.getAudioTracks();
-        
-        // Stream tracks checked
-        
+
+        console.log(`[Debug] Stream verification - Video tracks: ${videoTracks.length}, Audio tracks: ${audioTracks.length}`);
+
         if (videoTracks.length === 0) {
+            console.error(`[Debug] No video tracks found in stream - attempting fallback...`);
             // Try to create a test pattern if no video
             createTestPattern(canvas);
             await new Promise(resolve => setTimeout(resolve, 500));
@@ -370,16 +458,42 @@ async function startStream(config) {
             // Using test pattern as fallback
         }
         
-        // Connect to signaling server
-        connectToSignalingServer(config);
-        
+        // Check if we're in proxy mode or direct mode
+        if (config.useProxy) {
+            console.log(`[Debug] ========== PROXY MODE DETECTED ==========`);
+            console.log(`[Debug] Video tracks available: ${videoTracks.length}, Audio tracks: ${audioTracks.length}`);
+            console.log(`[Debug] Calling initializeProxyMode()...`);
+
+            // Initialize proxy mode with current config
+            initializeProxyMode(config);
+            console.log(`[Debug] initializeProxyMode() completed`);
+        } else {
+            // Connect to signaling server for direct mode
+            console.log(`[Debug] Direct mode - connecting to signaling server`);
+            connectToSignalingServer(config);
+        }
+
         // Start FPS monitoring
         startFPSMonitoring(canvas);
-        
+
+        console.log(`[Debug] ========== STREAM INITIALIZATION COMPLETE ==========`);
+        console.log(`[Debug] isStreaming: ${isStreaming}`);
+        console.log(`[Debug] localStream tracks: ${localStream ? localStream.getTracks().length : 0}`);
+
+        } catch (error) {
+            console.error(`[Debug] ========== STREAM INITIALIZATION ERROR ==========`);
+            console.error(`[Debug] Error:`, error);
+            notifyError(error.message);
+            stopStream();
+        }
     } catch (error) {
-        // Stream error occurred
+        console.error(`[Debug] ========== OUTER STREAM INITIALIZATION ERROR ==========`);
+        console.error(`[Debug] Error:`, error);
         notifyError(error.message);
         stopStream();
+    } finally {
+        streamInitializationInProgress = false;
+        console.log(`[Debug] Stream initialization lock released`);
     }
 }
 
@@ -408,18 +522,42 @@ function createTestPattern(canvas) {
 }
 
 function connectToSignalingServer(config) {
-    const wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
+    console.log(`[Debug] Stream config:`, config);
+
+    // Check if proxy mode is enabled
+    if (config.useProxy) {
+        console.log(`[Debug] Using event-based proxy mode - no direct WebSocket`);
+        initializeProxyMode(config);
+        return;
+    }
+
+    // Original WebSocket connection logic (fallback)
+    let wsUrl = config.webSocketUrl || 'ws://localhost:3000/ws';
+    let useSecureWebSocket = false;
+
+    if (window.location.protocol === 'https:') {
+        wsUrl = 'wss://localhost:3443/ws';
+        useSecureWebSocket = true;
+        console.log(`[Debug] CFX HTTPS detected - using localhost SSL endpoint`);
+    }
+
+    console.log(`[Debug] Page protocol: ${window.location.protocol}`);
+    console.log(`[Debug] WebSocket URL: ${wsUrl}`);
+
     const streamKey = config.streamKey || config.streamId;
-    
-    // Connecting to WebSocket
-    
+
     if (ws) {
         ws.close();
     }
-    
+
+    tryWebSocketConnection(wsUrl, config, useSecureWebSocket);
+}
+
+function tryWebSocketConnection(wsUrl, config, canFallback = false) {
     ws = new WebSocket(wsUrl);
-    
+
     ws.onopen = () => {
+        console.log(`[Debug] WebSocket connected successfully to ${wsUrl}`);
         // WebSocket connected
         clearReconnectTimer();
         
@@ -499,10 +637,33 @@ function connectToSignalingServer(config) {
     };
     
     ws.onerror = (error) => {
-        // WebSocket error
+        console.error(`[Debug] WebSocket error connecting to ${wsUrl}:`, error);
+
+        // CFX SSL fallback: if WSS fails and we can fallback, try different approaches
+        if (canFallback && wsUrl.startsWith('wss://')) {
+            console.log('[Debug] WSS failed, attempting IP-based WSS fallback...');
+            const fallbackUrl = wsUrl.replace('wss://localhost:', 'wss://192.99.60.230:');
+            setTimeout(() => {
+                tryWebSocketConnection(fallbackUrl, config, false);
+            }, 1000);
+            canFallback = false; // Prevent infinite fallback loops
+        }
     };
-    
+
     ws.onclose = (event) => {
+        console.log(`[Debug] WebSocket closed. Code: ${event.code}, Reason: ${event.reason}`);
+
+        // SSL handshake failure (1006) - try fallback if available
+        if (event.code === 1006 && canFallback && wsUrl.startsWith('wss://')) {
+            console.log('[Debug] SSL handshake failed (1006), trying IP-based WSS fallback...');
+            const fallbackUrl = wsUrl.replace('wss://localhost:', 'wss://192.99.60.230:');
+            setTimeout(() => {
+                tryWebSocketConnection(fallbackUrl, config, false);
+            }, 1000);
+            canFallback = false; // Prevent infinite fallback loops
+            return;
+        }
+
         // WebSocket closed
         stopHeartbeat();
 
@@ -585,7 +746,10 @@ async function handleViewerJoined(viewerId) {
         iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all',
         bundlePolicy: 'max-bundle',
         rtcpMuxPolicy: 'require',
-        iceCandidatePoolSize: 0
+        iceCandidatePoolSize: webrtcConfig ? webrtcConfig.iceCandidatePoolSize : 10,
+        // Additional settings for remote connectivity
+        iceConnectionTimeout: 30000,
+        iceGatheringTimeout: 10000
     };
 
     const viewerPc = new RTCPeerConnection(configuration);
@@ -728,7 +892,7 @@ function stopStream() {
     viewers.clear();
     updateDebug('viewerCount', '0');
 
-    // Close WebSocket with proper cleanup code
+    // Close WebSocket with proper cleanup code (direct mode)
     if (ws) {
         try {
             // Send cleanup notification before closing
@@ -746,6 +910,26 @@ function stopStream() {
         }
         ws = null;
     }
+
+    // Clean up proxy mode connections
+    if (globalConfig && globalConfig.useProxy) {
+        console.log(`[Debug] Cleaning up proxy mode connections`);
+        try {
+            // Notify proxy about stream stop
+            sendProxyMessage({
+                type: 'cleanup-stream',
+                streamKey: globalConfig.streamKey || globalConfig.streamId,
+                reason: 'manual_stop'
+            });
+        } catch (e) {
+            console.error('Error sending proxy cleanup message:', e);
+        }
+    }
+
+    // Reset proxy mode variables
+    globalConfig = null;
+    pendingProxyConnection = null;
+    peerConnection = null;
 
     // Stop MainRender
     if (renderStarted && typeof MainRender !== 'undefined' && MainRender.stop) {
@@ -840,22 +1024,22 @@ function adjustStreamQuality(performanceData) {
 
 // Notification functions
 function notifyStreamStarted() {
-    fetch(`https://${GetParentResourceName()}/streamStarted`, {
+    fetch(`https://redm_utk_streamer/streamStarted`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
             streamId: streamConfig.streamId,
             streamKey: streamConfig.streamKey || streamConfig.streamId
         })
-    });
+    }).catch(err => console.error('Failed to notify stream started:', err));
 }
 
 function notifyError(error) {
-    fetch(`https://${GetParentResourceName()}/streamError`, {
+    fetch(`https://redm_utk_streamer/streamError`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ error: error })
-    });
+    }).catch(err => console.error('Failed to notify error:', err));
 }
 
 // WebSocket streaming fallback functions
@@ -928,5 +1112,287 @@ setInterval(() => {
         gc();
     }
 }, 120000); // Every 2 minutes
+
+// Proxy Mode Functions
+function initializeProxyMode(config) {
+    console.log(`[Debug] ========== INITIALIZING PROXY MODE ==========`);
+    console.log(`[Debug] Stream ID: ${config.streamId}`);
+    console.log(`[Debug] Global config exists: ${!!globalConfig}`);
+    console.log(`[Debug] Pending connection exists: ${!!pendingProxyConnection}`);
+
+    // Prevent multiple simultaneous initializations
+    if (globalConfig && globalConfig.streamId === config.streamId) {
+        console.log(`[Debug] Proxy mode already initialized for this stream, skipping...`);
+        return;
+    }
+
+    globalConfig = config;
+    isStreaming = true;
+
+    console.log(`[Debug] Setting up proxy handlers...`);
+    // Set up proxy message handlers
+    setupProxyHandlers();
+    console.log(`[Debug] Proxy handlers set up complete`);
+
+    // Check if we have a pending proxy connection
+    if (pendingProxyConnection) {
+        console.log(`[Debug] Processing pending proxy connection data:`, pendingProxyConnection);
+        onProxyConnected(pendingProxyConnection);
+        pendingProxyConnection = null;
+        console.log(`[Debug] Pending proxy connection processed`);
+    } else {
+        // Wait for proxy connection
+        console.log(`[Debug] No pending connection - waiting for proxy connection...`);
+    }
+
+    // Also check for delayed proxy connections after video setup
+    console.log(`[Debug] Setting up delayed proxy connection check...`);
+    setTimeout(() => {
+        if (pendingProxyConnection && globalConfig && localStream) {
+            console.log(`[Debug] Processing delayed proxy connection...`);
+            onProxyConnected(pendingProxyConnection);
+            pendingProxyConnection = null;
+        }
+    }, 1000);
+
+    console.log(`[Debug] Proxy mode initialization complete`);
+}
+
+function setupProxyHandlers() {
+    // Proxy handlers are now integrated into the main message listener
+    console.log(`[Debug] Proxy handlers ready via main message listener`);
+}
+
+
+function onProxyConnected(connectionData) {
+    console.log(`[Debug] ========== PROXY CONNECTED ==========`);
+    console.log(`[Debug] Connection data:`, connectionData);
+
+    // Check if globalConfig is available and valid
+    if (!globalConfig) {
+        console.error(`[Debug] ERROR: globalConfig not available when proxy connected`);
+        return;
+    }
+
+    if (!globalConfig.streamKey) {
+        console.error(`[Debug] ERROR: globalConfig.streamKey not available:`, globalConfig);
+        return;
+    }
+
+    console.log(`[Debug] Global config is valid - streamKey: ${globalConfig.streamKey}`);
+    console.log(`[Debug] About to send register-streamer message...`);
+
+    // Register as streamer via proxy (don't call startStream again - it's already running)
+    const registerMessage = {
+        type: 'register-streamer',
+        streamKey: globalConfig.streamKey
+    };
+
+    console.log(`[Debug] Sending register message:`, registerMessage);
+    sendProxyMessage(registerMessage);
+    console.log(`[Debug] Register message sent - onProxyConnected complete`);
+}
+
+function sendProxyMessage(message) {
+    console.log(`[Debug] ========== SENDING PROXY MESSAGE ==========`);
+    console.log(`[Debug] Message type: ${message.type}`);
+    console.log(`[Debug] Full message:`, message);
+
+    try {
+        // Send WebRTC data via CFX-native events (no HTTP)
+        fetch(`https://redm_utk_streamer/sendWebRTCData`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: message.type,
+                data: message,
+                viewerId: message.viewerId
+            })
+        }).then(response => {
+            console.log(`[Debug] WebRTC data sent via CFX events: ${response.status}`);
+        }).catch(err => {
+            console.error('[Debug] CFX WebRTC relay failed:', err);
+        });
+    } catch (error) {
+        console.error('[Debug] ERROR: Failed to send proxy message:', error);
+    }
+
+    console.log(`[Debug] sendProxyMessage() completed`);
+}
+
+async function handleProxyViewerJoined(viewerId) {
+    console.log(`[Debug] Handling proxy viewer joined: ${viewerId}`);
+
+    // Check if we already have a peer connection for this viewer
+    if (viewers.has(viewerId)) {
+        console.log(`[Debug] Peer connection already exists for viewer ${viewerId}, ignoring duplicate`);
+        return;
+    }
+
+    const configuration = {
+        iceServers: webrtcConfig ? webrtcConfig.iceServers : [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ],
+        iceTransportPolicy: webrtcConfig ? webrtcConfig.iceTransportPolicy : 'all',
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+        iceCandidatePoolSize: webrtcConfig ? webrtcConfig.iceCandidatePoolSize : 10
+    };
+
+    const viewerPc = new RTCPeerConnection(configuration);
+
+    // Add tracks with encoding parameters
+    if (localStream) {
+        const tracks = localStream.getTracks();
+        if (tracks.length === 0) {
+            console.error(`[Debug] Local stream has no tracks for viewer ${viewerId}`);
+            return;
+        }
+        tracks.forEach(track => {
+            const sender = viewerPc.addTrack(track, localStream);
+
+            if (track.kind === 'video') {
+                const params = sender.getParameters();
+                if (params.encodings && params.encodings.length > 0) {
+                    params.encodings[0].maxBitrate = streamConfig?.quality?.bitrate || 25000000;
+                    params.encodings[0].maxFramerate = Math.min(60, streamConfig?.quality?.fps || 60);
+                    params.encodings[0].scaleResolutionDownBy = 1;
+
+                    if (params.encodings[0].hasOwnProperty('priority')) {
+                        params.encodings[0].priority = 'high';
+                    }
+                    if (params.encodings[0].hasOwnProperty('networkPriority')) {
+                        params.encodings[0].networkPriority = 'high';
+                    }
+
+                    sender.setParameters(params).catch(err => {
+                        console.error('Failed to set encoding parameters:', err);
+                    });
+                }
+            }
+        });
+        console.log(`[Debug] Added ${tracks.length} tracks to peer connection for viewer ${viewerId}`);
+    } else {
+        console.error(`[Debug] No local stream available for viewer ${viewerId}`);
+    }
+
+    // ICE candidates
+    viewerPc.onicecandidate = (event) => {
+        if (event.candidate) {
+            console.log(`[Debug] Sending ICE candidate via proxy for viewer ${viewerId}`);
+            sendProxyMessage({
+                type: 'ice-candidate',
+                candidate: event.candidate,
+                viewerId: viewerId
+            });
+        }
+    };
+
+    // Connection state
+    viewerPc.onconnectionstatechange = () => {
+        console.log(`[Debug] Viewer ${viewerId} connection state: ${viewerPc.connectionState}`);
+
+        if (viewerPc.connectionState === 'failed' || viewerPc.connectionState === 'closed') {
+            viewers.delete(viewerId);
+            updateDebug('viewerCount', viewers.size);
+        }
+    };
+
+    viewers.set(viewerId, viewerPc);
+    updateDebug('viewerCount', viewers.size);
+
+    // Create offer
+    try {
+        console.log(`[Debug] Creating offer for viewer ${viewerId}`);
+        const offerOptions = {
+            offerToReceiveVideo: false,
+            offerToReceiveAudio: false,
+            voiceActivityDetection: false,
+            iceRestart: false
+        };
+
+        const offer = await viewerPc.createOffer(offerOptions);
+        await viewerPc.setLocalDescription(offer);
+
+        console.log(`[Debug] Sending offer via proxy for viewer ${viewerId}`);
+        sendProxyMessage({
+            type: 'offer',
+            offer: offer,
+            viewerId: viewerId
+        });
+
+    } catch (error) {
+        console.error(`[Debug] Failed to create/send offer for viewer ${viewerId}:`, error);
+    }
+}
+
+function handleWebRTCMessage(message) {
+    console.log(`[Debug] Handling WebRTC message:`, message);
+
+    try {
+        if (!message || !message.type) {
+            console.error(`[Debug] Invalid message format:`, message);
+            return;
+        }
+
+        switch (message.type) {
+        case 'registered':
+            console.log(`[Debug] Successfully registered as streamer`);
+            notifyStreamStarted();
+            break;
+
+        case 'viewer-joined':
+            console.log(`[Debug] Viewer joined via proxy: ${message.viewerId}`);
+            if (message.viewerId) {
+                handleProxyViewerJoined(message.viewerId);
+            } else {
+                console.error(`[Debug] Invalid viewer-joined message - no viewerId:`, message);
+            }
+            break;
+
+        case 'viewer-left':
+            console.log(`[Debug] Viewer left via proxy: ${message.viewerId}`);
+            handleViewerLeft(message.viewerId);
+            break;
+
+        case 'offer-received':
+            console.log(`[Debug] Offer was received by server`);
+            break;
+
+        case 'answer-received':
+            console.log(`[Debug] Answer was received by server`);
+            break;
+
+        case 'ice-candidate-received':
+            console.log(`[Debug] ICE candidate was received by server`);
+            break;
+
+        case 'answer':
+            console.log(`[Debug] Received answer from viewer: ${message.viewerId}`);
+            if (message.viewerId && viewers.has(message.viewerId) && message.answer) {
+                const viewerPc = viewers.get(message.viewerId);
+                viewerPc.setRemoteDescription(new RTCSessionDescription(message.answer))
+                    .catch(err => console.error('Failed to set remote description:', err));
+            }
+            break;
+
+        case 'ice-candidate':
+            console.log(`[Debug] Received ICE candidate from viewer: ${message.viewerId}`);
+            if (message.viewerId && viewers.has(message.viewerId) && message.candidate) {
+                const viewerPc = viewers.get(message.viewerId);
+                viewerPc.addIceCandidate(new RTCIceCandidate(message.candidate))
+                    .catch(err => console.error('Failed to add ICE candidate:', err));
+            }
+            break;
+
+        default:
+            console.log(`[Debug] Unknown WebRTC message type: ${message.type}`);
+        }
+    } catch (error) {
+        console.error(`[Debug] Error in handleWebRTCMessage:`, error);
+        console.error(`[Debug] Message:`, message);
+    }
+}
 
 // Stream script loaded

@@ -2,13 +2,20 @@ Config = {}
 
 -- Media Server Configuration
 Config.MediaServer = {
+    -- IMPORTANT: Change 'localhost' to your server's public IP address for remote clients
+    -- Example: If your server IP is 192.168.1.100, use "http://192.168.1.100:3000"
+    -- For production: Use your public/external IP address
+
     -- WebRTC ingest endpoint
-    webrtc_url = "http://localhost:3000/webrtc",
-    -- HLS output endpoint  
-    hls_url = "http://localhost:3000/hls",
+    webrtc_url = "http://192.99.60.230:3000/webrtc",  -- Change 192.99.60.230 to your server IP
+    -- HLS output endpoint
+    hls_url = "http://192.99.60.230:3000/hls",        -- Change localhost to your server IP
     -- API endpoint
-    api_url = "http://localhost:3000/api",
-    api_key = "redm-media-server-key-2024"
+    api_url = "http://192.99.60.230:3000/api",        -- Change localhost to your server IP
+    api_key = "redm-media-server-key-2024",
+
+    -- Server IP for WebSocket connections (change this to your server's IP)
+    server_ip = "192.99.60.230"  -- Change to your actual server IP (e.g. "192.168.1.100" or public IP)
 }
 
 -- Stream Quality Settings (optimized for quality vs performance balance)
