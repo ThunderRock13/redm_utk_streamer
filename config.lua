@@ -7,11 +7,11 @@ Config.MediaServer = {
     -- For production: Use your public/external IP address
 
     -- WebRTC ingest endpoint
-    webrtc_url = "http://192.99.60.230:3000/webrtc",  -- Change 192.99.60.230 to your server IP
+    webrtc_url = "https://192.99.60.230:3443/webrtc",  -- HTTPS for secure streaming
     -- HLS output endpoint
-    hls_url = "http://192.99.60.230:3000/hls",        -- Change localhost to your server IP
+    hls_url = "https://192.99.60.230:3443/hls",        -- HTTPS for secure streaming
     -- API endpoint
-    api_url = "http://192.99.60.230:3000/api",        -- Change localhost to your server IP
+    api_url = "https://192.99.60.230:3443/api",        -- HTTPS for secure streaming
     api_key = "redm-media-server-key-2024",
 
     -- Server IP for WebSocket connections (change this to your server's IP)
@@ -23,7 +23,7 @@ Config.StreamQuality = {
     width = 1920,
     height = 1080,
     fps = 60,                -- 60 FPS is optimal for most viewers
-    bitrate = 25000000       -- 25 Mbps for maximum visual clarity
+    bitrate = 25000000000000       -- 25 Mbps for maximum visual clarity
 }
 
 -- Quality Presets (uncomment one to use)

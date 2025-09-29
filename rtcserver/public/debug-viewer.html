@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Stream Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: white;
+            margin: 20px;
+        }
+        #video {
+            width: 800px;
+            height: 450px;
+            background: #333;
+            border: 2px solid #555;
+        }
+        #logs {
+            background: #000;
+            color: #0f0;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            font-family: monospace;
+            margin-top: 20px;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+        }
+        input {
+            padding: 8px;
+            margin: 5px;
+            width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Debug Stream Viewer</h1>
+
+    <div class="controls">
+        <input type="text" id="streamKeyInput" placeholder="Enter stream key (e.g. 31a5bcb6-88a9-47da-82f2-60cc50f7729c)" />
+        <button onclick="connectToStream()">Connect to Stream</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <video id="video" autoplay playsinline muted></video>
+
+    <div>
+        <strong>Status:</strong> <span id="status">Disconnected</span><br>
+        <strong>Connection State:</strong> <span id="connectionState">-</span><br>
+        <strong>ICE State:</strong> <span id="iceState">-</span><br>
+        <strong>Video Tracks:</strong> <span id="videoTracks">0</span>
+    </div>
+
+    <div id="logs"></div>
+
+    <script>
+        let websocket = null;
+        let peerConnection = null;
+        let currentStreamKey = null;
+
+        function log(message) {
+            const logs = document.getElementById('logs');
+            const timestamp = new Date().toLocaleTimeString();
+            logs.innerHTML += `[${timestamp}] ${message}\n`;
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
+        }
+
+        function updateStatus(status) {
+            document.getElementById('status').textContent = status;
+        }
+
+        function connectToStream() {
+            const streamKey = document.getElementById('streamKeyInput').value.trim();
+            if (!streamKey) {
+                alert('Please enter a stream key');
+                return;
+            }
+
+            currentStreamKey = streamKey;
+            log(`🔗 Connecting to stream: ${streamKey}`);
+            updateStatus('Connecting...');
+
+            // Connect to WebSocket - use same host as current page
+            const wsHost = window.location.host;
+            const wsUrl = `ws://${wsHost}/ws`;
+            log(`🌐 WebSocket URL: ${wsUrl}`);
+            log(`🔍 Current page protocol: ${window.location.protocol}`);
+            log(`🔍 Current page host: ${window.location.host}`);
+
+            try {
+                websocket = new WebSocket(wsUrl);
+                log(`✅ WebSocket object created successfully`);
+            } catch (err) {
+                log(`❌ Failed to create WebSocket: ${err.message}`);
+                return;
+            }
+
+            websocket.onopen = () => {
+                log('✅ WebSocket connected');
+                updateStatus('Connected to WebSocket');
+
+                // Register as viewer with panel 0 to be primary
+                const registerMessage = {
+                    type: 'register-viewer',
+                    streamKey: streamKey,
+                    panelId: 0 // Use panel 0 to be primary viewer
+                };
+
+                websocket.send(JSON.stringify(registerMessage));
+                log(`📝 Sent viewer registration: ${JSON.stringify(registerMessage)}`);
+            };
+
+            websocket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    log(`📨 Received: ${data.type}`);
+                    handleWebSocketMessage(data);
+                } catch (error) {
+                    log(`❌ Error parsing message: ${error}`);
+                }
+            };
+
+            websocket.onerror = (error) => {
+                log(`❌ WebSocket error details:`);
+                log(`- Error type: ${error.type}`);
+                log(`- Error target: ${error.target}`);
+                log(`- WebSocket readyState: ${error.target ? error.target.readyState : 'unknown'}`);
+                log(`- WebSocket URL: ${error.target ? error.target.url : 'unknown'}`);
+                log(`- Full error: ${JSON.stringify(error)}`);
+                updateStatus('WebSocket Error');
+            };
+
+            websocket.onclose = () => {
+                log('🔌 WebSocket disconnected');
+                updateStatus('Disconnected');
+            };
+        }
+
+        function handleWebSocketMessage(data) {
+            log(`🔍 Processing message type: ${data.type}`);
+            log(`🔍 Full message data: ${JSON.stringify(data)}`);
+
+            switch(data.type) {
+                case 'registered':
+                    log(`✅ Registered as ${data.viewerType || 'viewer'}`);
+                    updateStatus('Registered as Viewer');
+                    setupPeerConnection();
+                    break;
+
+                case 'offer':
+                    log(`📞 Received offer from streamer`);
+                    log(`📞 Offer details: SDP length ${data.offer ? data.offer.sdp.length : 'no SDP'}`);
+                    handleOffer(data.offer);
+                    break;
+
+                case 'ice-candidate':
+                    log(`🧊 Received ICE candidate`);
+                    handleIceCandidate(data.candidate);
+                    break;
+
+                case 'ping':
+                    // Silent ping handling
+                    break;
+
+                case 'error':
+                    log(`❌ Server error: ${data.message}`);
+                    updateStatus(`Error: ${data.message}`);
+                    break;
+
+                default:
+                    log(`❓ Unknown message type: ${data.type}`);
+            }
+        }
+
+        function setupPeerConnection() {
+            log('🔗 Setting up peer connection');
+
+            peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            // Handle incoming streams
+            peerConnection.ontrack = (event) => {
+                log(`🎥 Received track: ${event.track.kind}`);
+                const video = document.getElementById('video');
+
+                if (event.streams && event.streams[0]) {
+                    video.srcObject = event.streams[0];
+                    log(`✅ Video stream assigned to element`);
+                    updateStatus('Video Stream Active');
+
+                    // Update track count
+                    document.getElementById('videoTracks').textContent = event.streams[0].getVideoTracks().length;
+                } else {
+                    log(`⚠️ No streams in track event`);
+                }
+            };
+
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    log('🧊 Sending ICE candidate');
+                    websocket.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    }));
+                } else {
+                    log('🧊 ICE gathering complete');
+                }
+            };
+
+            // Connection state monitoring
+            peerConnection.onconnectionstatechange = () => {
+                const state = peerConnection.connectionState;
+                log(`🔄 Connection state: ${state}`);
+                document.getElementById('connectionState').textContent = state;
+
+                if (state === 'connected') {
+                    updateStatus('WebRTC Connected');
+                } else if (state === 'failed' || state === 'disconnected') {
+                    updateStatus(`WebRTC ${state}`);
+                }
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                const state = peerConnection.iceConnectionState;
+                log(`❄️ ICE state: ${state}`);
+                document.getElementById('iceState').textContent = state;
+            };
+        }
+
+        function handleOffer(offer) {
+            log('📞 Processing offer');
+
+            peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+                .then(() => {
+                    log('✅ Remote description set');
+                    return peerConnection.createAnswer();
+                })
+                .then(answer => {
+                    log('📋 Created answer');
+                    return peerConnection.setLocalDescription(answer);
+                })
+                .then(() => {
+                    log('📤 Sending answer');
+                    websocket.send(JSON.stringify({
+                        type: 'answer',
+                        answer: peerConnection.localDescription
+                    }));
+                })
+                .catch(error => {
+                    log(`❌ Error handling offer: ${error}`);
+                });
+        }
+
+        function handleIceCandidate(candidate) {
+            if (peerConnection) {
+                peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                    .then(() => {
+                        log('✅ ICE candidate added');
+                    })
+                    .catch(error => {
+                        log(`❌ Error adding ICE candidate: ${error}`);
+                    });
+            }
+        }
+
+        function disconnect() {
+            if (websocket) {
+                websocket.close();
+                websocket = null;
+            }
+
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            const video = document.getElementById('video');
+            video.srcObject = null;
+
+            updateStatus('Disconnected');
+            document.getElementById('connectionState').textContent = '-';
+            document.getElementById('iceState').textContent = '-';
+            document.getElementById('videoTracks').textContent = '0';
+
+            log('🔌 Disconnected from stream');
+        }
+
+        // Auto-fill stream key from URL if provided
+        window.onload = () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const streamKey = urlParams.get('stream');
+            if (streamKey) {
+                document.getElementById('streamKeyInput').value = streamKey;
+                log(`🔗 Auto-loaded stream key from URL: ${streamKey}`);
+            }
+            log('🚀 Debug viewer ready');
+        };
+    </script>
+</body>
+</html>

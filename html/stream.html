@@ -17,15 +17,7 @@
         <div>FPS: <span id="fps">0</span></div>
     </div>
     
-    <!-- IMPORTANT: Load the utk_render script module first -->
-    <script type="module" src="stream.js"></script>
-    <script>
-        // Wait for module to load
-        setTimeout(() => {
-            const script = document.createElement('script');
-            script.src = 'stream.js';
-            document.body.appendChild(script);
-        }, 1000);
-    </script>
+    <!-- Load the stream script -->
+    <script src="stream.js"></script>
 </body>
 </html>

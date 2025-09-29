@@ -70,9 +70,15 @@ app.use(cors({
     credentials: true
 }));
 
-// Allow mixed content for CFX clients
+// Security headers for CFX clients
 app.use((req, res, next) => {
-    res.header('Content-Security-Policy', "upgrade-insecure-requests");
+    // Only upgrade to HTTPS if we're already using HTTPS
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+        res.header('Content-Security-Policy', "upgrade-insecure-requests; script-src 'self' 'unsafe-inline' blob:");
+    } else {
+        // Allow blob scripts for WebRTC when using HTTP
+        res.header('Content-Security-Policy', "script-src 'self' 'unsafe-inline' blob:");
+    }
     res.header('X-Content-Type-Options', 'nosniff');
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
@@ -89,6 +95,11 @@ app.use('/assets', express.static(path.join(__dirname, 'public')));
 // Serve monitor page
 app.get('/monitor', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'monitor.html'));
+});
+
+// Serve debug viewer page
+app.get('/debug', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'debug-viewer.html'));
 });
 
 
@@ -271,6 +282,12 @@ app.post('/api/websocket/message', authenticateAPI, (req, res) => {
                 response = { type: 'ice-candidate-received' };
                 break;
 
+            case 'video-frame':
+                // Handle incoming video frame from RedM server
+                const frameResult = handleVideoFrame(playerId, parsedMessage);
+                response = { type: 'video-frame-received', processed: frameResult };
+                break;
+
             default:
                 console.log(`[WebSocket Proxy] Unknown message type: ${parsedMessage.type}`);
                 response = { type: 'unknown', message: 'Message type not recognized' };
@@ -354,7 +371,97 @@ setInterval(() => {
     }
 }, 60000); // Check every minute
 
+// Video Frame Processing for RedM Server Streams
+const videoFrameStreams = new Map(); // streamKey -> { frames: [], viewers: Set(), lastFrame: timestamp }
+
+function handleVideoFrame(playerId, frameMessage) {
+    const { viewerId, frameData, frameNumber, timestamp } = frameMessage;
+
+    // Find the stream for this player
+    let streamKey = null;
+    for (const [pid, connection] of proxyConnections.entries()) {
+        if (pid === parseInt(playerId)) {
+            streamKey = connection.streamKey;
+            break;
+        }
+    }
+
+    if (!streamKey) {
+        console.log(`[Video Frame] No stream found for player ${playerId}`);
+        return false;
+    }
+
+    // Initialize frame stream if needed
+    if (!videoFrameStreams.has(streamKey)) {
+        videoFrameStreams.set(streamKey, {
+            frames: [],
+            viewers: new Set(),
+            lastFrame: Date.now(),
+            frameCount: 0,
+            droppedFrames: 0
+        });
+        console.log(`[Video Frame] Initialized frame stream for ${streamKey}`);
+    }
+
+    const frameStream = videoFrameStreams.get(streamKey);
+    frameStream.frameCount++;
+    frameStream.lastFrame = Date.now();
+
+    // Store the latest frame (keep buffer small for low latency)
+    const frame = {
+        data: frameData,
+        number: frameNumber,
+        timestamp: timestamp,
+        receivedAt: Date.now()
+    };
+
+    // Keep only the latest frame to minimize latency
+    frameStream.frames = [frame];
+
+    // Send frame to all connected viewers immediately
+    let viewersSent = 0;
+    for (const [clientId, conn] of connections.entries()) {
+        if (conn.role === 'viewer' && conn.streamKey === streamKey) {
+            sendFrameToViewer(clientId, conn.ws, frame);
+            viewersSent++;
+        }
+    }
+
+    // Log progress every 100 frames
+    if (frameStream.frameCount % 100 === 0) {
+        console.log(`[Video Frame] Stream ${streamKey}: ${frameStream.frameCount} frames processed, sent to ${viewersSent} viewers`);
+    }
+
+    return true;
+}
+
+function sendFrameToViewer(clientId, ws, frame) {
+    if (ws.readyState === WebSocket.OPEN) {
+        try {
+            ws.send(JSON.stringify({
+                type: 'video-frame-data',
+                frameData: frame.data,
+                frameNumber: frame.number,
+                timestamp: frame.timestamp
+            }));
+        } catch (error) {
+            console.error(`[Video Frame] Error sending frame to viewer ${clientId}:`, error);
+        }
+    }
+}
+
+// Clean up frame streams when streams end
+function cleanupVideoFrameStream(streamKey) {
+    if (videoFrameStreams.has(streamKey)) {
+        const stream = videoFrameStreams.get(streamKey);
+        console.log(`[Video Frame] Cleaning up stream ${streamKey}: ${stream.frameCount} total frames`);
+        videoFrameStreams.delete(streamKey);
+    }
+}
+
 console.log('🔗 WebSocket proxy endpoints initialized');
+console.log('✅ Direct streamer WebSocket connections ENABLED - NUI connects directly');
+console.log('🎬 Video frame processing enabled for RedM streams');
 
 // WebSocket API key validation
 const validateWSApiKey = (data) => {
@@ -619,9 +726,28 @@ app.post('/api/webrtc/relay', authenticateAPI, (req, res) => {
             console.log(`[WebRTC Relay] Unknown message type: ${messageType}`);
     }
 
-    // Include forwarding instructions
+    // Include forwarding instructions and actually forward the messages
     if (forwardTo.length > 0) {
         response.forwardTo = forwardTo;
+
+        // Actually forward the messages to WebSocket clients
+        forwardTo.forEach(({ playerId, message }) => {
+            // Find WebSocket connection for this playerId (viewer)
+            let targetConnection = null;
+            for (const [clientId, conn] of connections.entries()) {
+                if (conn.role === 'viewer' && clientId === playerId) {
+                    targetConnection = conn;
+                    break;
+                }
+            }
+
+            if (targetConnection && targetConnection.ws && targetConnection.ws.readyState === WebSocket.OPEN) {
+                console.log(`[WebRTC Relay] Forwarding ${messageType} to WebSocket client ${playerId}`);
+                targetConnection.ws.send(JSON.stringify(message));
+            } else {
+                console.log(`[WebRTC Relay] Could not forward to ${playerId} - WebSocket not found or not open`);
+            }
+        });
     }
 
     res.json(response);
@@ -760,33 +886,37 @@ function broadcastToMonitors(message) {
     console.log(`[Broadcast] Sent ${message.type} to ${monitorCount} monitors`);
 }
 
-// WebSocket handling
+// WebSocket handling - MONITOR CONNECTIONS ONLY (RedM server handles all client streaming)
 wss.on('connection', (ws, req) => {
     const clientId = uuidv4();
 
-    
+    console.log(`[WebSocket] New connection: ${clientId} from ${req.connection.remoteAddress}`);
+
     connections.set(clientId, {
         ws,
         role: null,
         streamKey: null
     });
-    
+
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
+
+            // Allow direct streamer connections again (fx_version 'bodacious' enables this)
+
             handleWebSocketMessage(clientId, ws, data);
         } catch (error) {
-            // Message parsing error
+            console.error(`[WebSocket] Message parsing error from ${clientId}:`, error);
         }
     });
-    
-    ws.on('close', () => {
 
+    ws.on('close', () => {
+        console.log(`[WebSocket] Client disconnected: ${clientId}`);
         handleDisconnect(clientId);
     });
-    
+
     ws.on('error', (error) => {
-        // WebSocket error
+        console.error(`[WebSocket] Error from ${clientId}:`, error);
     });
 });
 
@@ -828,10 +958,12 @@ function handleWebSocketMessage(clientId, ws, data) {
             break;
 
         case 'answer':
+            console.log(`[WebRTC] Received answer from monitor ${clientId}`);
             handleAnswer(clientId, data);
             break;
 
         case 'ice-candidate':
+            console.log(`[WebRTC] Received ICE candidate from monitor ${clientId}`);
             handleIceCandidate(clientId, data);
             break;
 
@@ -1111,6 +1243,7 @@ function handleMonitorGetPlayers(clientId, ws, data) {
     }));
 }
 
+// This function is now only used by RedM server proxy connections, not direct WebSocket clients
 function handleStreamerRegistration(clientId, ws, data) {
     const { streamKey } = data;
 
@@ -1412,10 +1545,13 @@ function handleOffer(clientId, data) {
     if (!stream) return;
     
     // Forward offer to appropriate party
-    if (connection.role === 'streamer' && data.viewerId) {
-        // Find viewer and send offer
+    if (connection.role === 'streamer' && (data.viewerId || data.to)) {
+        // Find viewer and send offer (handle both 'viewerId' and 'to' fields)
+        const targetViewerId = data.viewerId || data.to;
+        console.log(`[Offer] Forwarding offer from streamer ${clientId} to viewer ${targetViewerId}`);
+
         for (const [vid, vconn] of connections) {
-            if (vid === data.viewerId && vconn.role === 'viewer') {
+            if (vid === targetViewerId && vconn.role === 'viewer') {
                 const offerMessage = {
                     type: 'offer',
                     offer: data.offer,
@@ -1428,7 +1564,9 @@ function handleOffer(clientId, data) {
                 }
                 
 
+                console.log(`[Offer] Sending offer to viewer ${vid}, panel ${offerMessage.panelId}`);
                 vconn.ws.send(JSON.stringify(offerMessage));
+                console.log(`[Offer] Offer sent successfully to viewer ${vid}`);
                 break;
             }
         }
@@ -1826,13 +1964,37 @@ function cleanupViewerSharing(clientId) {
 
 
 
+                console.log(`[Primary Failover] Promoting viewer ${newPrimary} to primary for stream ${streamKey}`);
+
                 // Notify the new primary viewer
                 const newPrimaryConnection = connections.get(newPrimary);
                 if (newPrimaryConnection && newPrimaryConnection.ws) {
                     newPrimaryConnection.ws.send(JSON.stringify({
                         type: 'promoted-to-primary',
-                        streamKey: streamKey
+                        streamKey: streamKey,
+                        role: 'viewer',
+                        viewerType: 'primary'
                     }));
+
+                    // Find the stream and notify streamer to send new offer
+                    let stream = null;
+                    for (const [id, s] of activeStreams) {
+                        if (s.streamKey === streamKey) {
+                            stream = s;
+                            break;
+                        }
+                    }
+
+                    if (stream && stream.streamerWs && stream.streamerWs.readyState === WebSocket.OPEN) {
+                        // Tell streamer about the new primary viewer
+                        const viewerJoinedMessage = {
+                            type: 'viewer-joined',
+                            viewerId: newPrimary,
+                            panelId: newPrimaryConnection.panelId || 0
+                        };
+                        stream.streamerWs.send(JSON.stringify(viewerJoinedMessage));
+                        console.log(`[Primary Failover] Notified streamer about new primary viewer ${newPrimary}`);
+                    }
                 }
             } else {
                 // No shared viewers left - remove sharing entry

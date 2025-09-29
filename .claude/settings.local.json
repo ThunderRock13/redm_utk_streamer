@@ -15,7 +15,9 @@
       "Bash(tasklist:*)",
       "Bash(openssl:*)",
       "Bash(node:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(timeout:*)",
+      "Bash(dir \"C:\\Users\\PoeticRP\\Desktop\\TestServer\\cfx-master\\resources\\[Scripts]\\redm_utk_streamer\\rtcserver\\ssl\")"
     ],
     "deny": [],
     "ask": []

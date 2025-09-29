@@ -11,6 +11,11 @@ function getDefaultServerUrl() {
         return 'http://localhost:3000';
     }
 
+    // For remote access, always prefer HTTPS if available
+    if (window.location.protocol === 'https:') {
+        return `https://${currentHost}:3443`;
+    }
+
     // Otherwise, use the current hostname with port 3000
     return `${window.location.protocol}//${currentHost}:3000`;
 }
@@ -21,6 +26,11 @@ function getDefaultWsUrl() {
     // If accessing from localhost, use localhost
     if (currentHost === 'localhost' || currentHost === '127.0.0.1') {
         return 'ws://localhost:3000/ws';
+    }
+
+    // For remote access, always prefer WSS if available
+    if (window.location.protocol === 'https:') {
+        return `wss://${currentHost}:3443/ws`;
     }
 
     // Otherwise, use the current hostname with port 3000
@@ -255,6 +265,11 @@ function connectWebSocket() {
                 console.log('⚠️ Falling back to WebSocket streaming for:', data.streamKey);
                 enableWebSocketStreaming(data.streamKey, data.panelId);
                 break;
+
+            case 'video-frame-data':
+                // Handle incoming video frame from RedM client
+                handleVideoFrameData(data);
+                break;
         }
     };
 
@@ -367,10 +382,11 @@ function setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, 
     // Set up WebRTC connection for this panel AFTER UI is ready
     console.log('🔗 Setting up peer connection for panel', panelId);
 
-    // Wait a bit for UI to stabilize before setting up WebRTC
+    // Immediate setup for panel 0, slight delay for others
+    const delay = panelId === 0 ? 0 : 250;
     setTimeout(() => {
         setupPeerConnectionForPanel(panelId, video, streamKey);
-    }, 500);
+    }, delay);
 
     // Store active stream with video monitoring
     activeStreams.set(playerId, {
@@ -384,8 +400,10 @@ function setupStreamInPanel(panelId, streamId, streamKey, playerName, playerId, 
     // Update player list
     updatePlayerStreaming(playerId, true);
 
-    // Start video health monitoring for this panel
-    startVideoHealthMonitoring(panelId, playerId);
+    // Start video health monitoring for this panel (delayed to allow connection to establish)
+    setTimeout(() => {
+        startVideoHealthMonitoring(panelId, playerId);
+    }, 10000); // Wait 10 seconds before starting health monitoring
 
     console.log('✅ Stream UI setup complete:', playerName, 'in panel', panelId);
 }
@@ -395,7 +413,7 @@ function startVideoSourceMonitoring(panelId, streamKey) {
     console.log(`🔍 Starting video source monitoring for panel ${panelId}`);
 
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 6; // Increased from 3 to 6 (30 seconds total)
 
     const sourceCheckInterval = setInterval(() => {
         attempts++;
@@ -414,6 +432,15 @@ function startVideoSourceMonitoring(panelId, streamKey) {
             console.log(`✅ Panel ${panelId}: Video source now available!`);
             clearInterval(sourceCheckInterval);
             window.videoSourceChecks.delete(panelId);
+            return;
+        }
+
+        // Check if WebRTC connection is still establishing
+        const pc = connectionInfo.peerConnection;
+        if (pc && (pc.connectionState === 'connecting' || pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'connected')) {
+            console.log(`🔄 Panel ${panelId}: WebRTC still establishing (${pc.connectionState}/${pc.iceConnectionState}), extending timeout`);
+            // Don't count this attempt if connection is actively establishing
+            attempts--;
             return;
         }
 
@@ -642,10 +669,10 @@ function setupPeerConnectionForPanel(panelId, videoElement, streamKey) {
             // Start monitoring for video tracks after connection establishes (extended delay)
             setTimeout(() => {
                 if (!videoElement.srcObject) {
-                    console.log(`⚠️ Panel ${panelId}: WebRTC connected but no video source after 10 seconds`);
+                    console.log(`⚠️ Panel ${panelId}: WebRTC connected but no video source after 8 seconds`);
                     startVideoSourceMonitoring(panelId, streamKey);
                 }
-            }, 10000); // Increased from 3 to 10 seconds
+            }, 8000); // Optimized timing for faster first connection
 
         } else if (pc.connectionState === 'failed') {
             console.log(`❌ Panel ${panelId} WebRTC connection failed`);
@@ -709,6 +736,20 @@ async function handleWebRTCOffer(data) {
         });
     }
 
+    // Prevent duplicate offer processing
+    if (connectionInfo) {
+        if (connectionInfo.processingOffer) {
+            console.log('📡 Ignoring duplicate offer - already processing offer for this connection');
+            return;
+        }
+        if (connectionInfo.pc.signalingState !== 'stable') {
+            console.log('📡 Ignoring duplicate offer - peer connection in signaling state:', connectionInfo.pc.signalingState);
+            return;
+        }
+        // Mark as processing offer
+        connectionInfo.processingOffer = true;
+    }
+
     // If still no connection, wait a bit and try again (race condition fix)
     if (!connectionInfo) {
         console.log('⏳ No peer connection ready yet, waiting 1 second...');
@@ -770,8 +811,17 @@ async function handleWebRTCOffer(data) {
 
         setTimeout(() => forcePlay(), 500);
 
+        // Clear processing flag on success
+        if (connectionInfo) {
+            connectionInfo.processingOffer = false;
+        }
+
     } catch (error) {
         console.error('❌ Error handling WebRTC offer:', error);
+        // Clear processing flag on error
+        if (connectionInfo) {
+            connectionInfo.processingOffer = false;
+        }
     }
 }
 
@@ -1003,8 +1053,10 @@ async function startStreamInPanel(playerId, panelId) {
     
     console.log('🎬 Starting stream: Player', playerId, 'in Panel', panelId);
     
-    if (panelId < 0 || panelId >= panels.length) {
-        console.error('❌ Invalid panel ID:', panelId);
+    // Convert to number and validate
+    panelId = parseInt(panelId);
+    if (isNaN(panelId) || panelId < 0 || panelId >= panels.length) {
+        console.log('⚠️ Skipping invalid panel ID:', panelId, 'panels available:', panels.length);
         return;
     }
     
@@ -1064,8 +1116,10 @@ function stopStreamInPanel(panelId) {
 
     console.log('⏹️ Stopping stream in panel', panelId);
 
-    if (panelId < 0 || panelId >= panels.length) {
-        console.error('❌ Invalid panel ID:', panelId);
+    // Convert to number and validate
+    panelId = parseInt(panelId);
+    if (isNaN(panelId) || panelId < 0 || panelId >= panels.length) {
+        console.log('⚠️ Skipping invalid panel ID:', panelId, 'panels available:', panels.length);
         return;
     }
 
@@ -1591,8 +1645,35 @@ function handlePromotedToPrimary(streamKey) {
         primaryViewerConnection = null;
     }
 
-    // The stream should continue normally as we're now the primary viewer
-    // Future viewers will connect to us for sharing
+    // Find the panel for this stream key and restart WebRTC connection
+    let targetPanelId = null;
+    let targetPlayerId = null;
+
+    // Search through active streams to find the panel
+    activeStreams.forEach((stream, playerId) => {
+        if (stream.streamKey === streamKey) {
+            targetPanelId = stream.panelId;
+            targetPlayerId = playerId;
+        }
+    });
+
+    if (targetPanelId !== null && targetPlayerId !== null) {
+        console.log(`🔄 Restarting WebRTC connection for panel ${targetPanelId} as primary viewer`);
+
+        // Close existing peer connection for this panel
+        const connectionInfo = panelPeerConnections.get(targetPanelId);
+        if (connectionInfo && connectionInfo.peerConnection) {
+            connectionInfo.peerConnection.close();
+        }
+
+        // Re-setup peer connection for this panel as primary viewer
+        const stream = activeStreams.get(targetPlayerId);
+        if (stream && stream.video) {
+            setupPeerConnectionForPanel(targetPanelId, stream.video, streamKey);
+        }
+    } else {
+        console.warn('⚠️ Could not find panel for promoted stream key:', streamKey);
+    }
 }
 
 // WebSocket video streaming fallback functions
@@ -1657,6 +1738,117 @@ function handleWebSocketVideoFrame(streamKey, frameData) {
         img.src = 'data:image/jpeg;base64,' + frameData;
     } catch (error) {
         console.error('❌ Error handling WebSocket video frame:', error);
+    }
+}
+
+// Handle video frame data from RedM clients
+function handleVideoFrameData(data) {
+    const { frameData, frameNumber, timestamp } = data;
+
+    // Find the panel that should display this frame
+    // We need to determine which panel is viewing this stream
+    let targetPanel = null;
+    let targetStreamKey = null;
+
+    // Look through active peer connections to find the right panel
+    for (const [streamKey, panelIds] of Object.entries(peerConnections)) {
+        for (const panelId of panelIds) {
+            const panel = document.getElementById(`panel-${panelId}`);
+            if (panel && panel.querySelector('.viewer-info')) {
+                targetPanel = panel;
+                targetStreamKey = streamKey;
+                break;
+            }
+        }
+        if (targetPanel) break;
+    }
+
+    if (!targetPanel) {
+        // If no specific panel found, try to find any panel expecting video
+        for (let i = 0; i < 4; i++) {
+            const panel = document.getElementById(`panel-${i}`);
+            const video = panel?.querySelector('video');
+            if (video && !video.srcObject) {
+                targetPanel = panel;
+                break;
+            }
+        }
+    }
+
+    if (!targetPanel) {
+        console.log('📺 No panel available for video frame');
+        return;
+    }
+
+    // Get or create canvas for this panel
+    let canvas = targetPanel.querySelector('canvas.frame-canvas');
+    if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.className = 'frame-canvas';
+        canvas.width = 640;
+        canvas.height = 360;
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        canvas.style.objectFit = 'contain';
+        canvas.style.backgroundColor = '#000';
+
+        // Replace or hide the video element
+        const video = targetPanel.querySelector('video');
+        if (video) {
+            video.style.display = 'none';
+            video.parentNode.insertBefore(canvas, video);
+        } else {
+            targetPanel.appendChild(canvas);
+        }
+
+        console.log('📺 Created frame canvas for panel');
+    }
+
+    const ctx = canvas.getContext('2d');
+
+    try {
+        // Decode and display the frame
+        const img = new Image();
+        img.onload = () => {
+            // Clear canvas and draw new frame
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+            // Update frame counter display
+            const frameCounter = targetPanel.querySelector('.frame-counter');
+            if (frameCounter) {
+                frameCounter.textContent = `Frame: ${frameNumber}`;
+            } else {
+                // Create frame counter
+                const counter = document.createElement('div');
+                counter.className = 'frame-counter';
+                counter.style.position = 'absolute';
+                counter.style.bottom = '5px';
+                counter.style.left = '5px';
+                counter.style.color = 'white';
+                counter.style.fontSize = '12px';
+                counter.style.background = 'rgba(0,0,0,0.5)';
+                counter.style.padding = '2px 5px';
+                counter.style.borderRadius = '3px';
+                counter.textContent = `Frame: ${frameNumber}`;
+                targetPanel.style.position = 'relative';
+                targetPanel.appendChild(counter);
+            }
+        };
+
+        img.onerror = () => {
+            console.error('❌ Failed to decode video frame');
+        };
+
+        img.src = 'data:image/jpeg;base64,' + frameData;
+
+        // Log every 100th frame
+        if (frameNumber % 100 === 0) {
+            console.log(`📺 Displayed frame ${frameNumber} in panel`);
+        }
+
+    } catch (error) {
+        console.error('❌ Error handling video frame data:', error);
     }
 }
 
